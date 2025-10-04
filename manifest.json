@@ -1,0 +1,12 @@
+{
+	"id": "obsidian-yuhanbo-voice_assistant",
+	"name": "语音助手 (Voice Assistant)",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "一个功能完整的语音助手插件，支持讯飞在线语音识别、语音合成、语音唤醒，以及多种大模型集成（Google AI Studio、OpenRouter、讯飞星火）。",
+	"author": "余汉波",
+	"authorUrl": "https://github.com/yuhanbo758",
+	"fundingUrl": "https://gdsx.sanrenjz.com/PicGo/%E6%89%93%E8%B5%8F%E7%A0%81500.png",
+	"isDesktopOnly": true,
+	"js": "main.js"
+}
