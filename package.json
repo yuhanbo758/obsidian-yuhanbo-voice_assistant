@@ -1,6 +1,6 @@
 {
 	"name": "yuhanbo-voice-assistant",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Desktop voice recognition, speech synthesis, wake words, and AI integration for Obsidian.",
 	"main": "main.js",
 	"scripts": {
