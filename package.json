@@ -16,7 +16,7 @@
 		"xunfei"
 	],
 	"author": "Yuhanbo Yu",
-	"license": "MIT",
+	"license": "Apache-2.0",
 	"devDependencies": {
 		"@types/crypto-js": "^4.2.2",
 		"@types/node": "^16.11.6",

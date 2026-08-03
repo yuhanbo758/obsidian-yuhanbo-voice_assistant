@@ -72,4 +72,4 @@ Pushes to `main` that change plugin release files trigger the automatic release 
 
 ## License
 
-[MIT](LICENSE) © Yuhanbo Yu
+[Apache License 2.0](LICENSE) © Yuhanbo Yu
