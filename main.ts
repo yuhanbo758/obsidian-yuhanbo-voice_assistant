@@ -1,5 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
-import { spawn, ChildProcess } from 'child_process';
+import { App, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, requestUrl, Setting } from 'obsidian';
 import * as CryptoJS from 'crypto-js';
 
 // 插件设置接口定义
@@ -134,12 +133,12 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private audioChunks: Blob[] = [];
 	private isRecording = false;
 	private isListening = false;
-	private wakeProcess: ChildProcess | null = null;
 	private wakeWebSocket: WebSocket | null = null;
 	private statusFloat: HTMLElement | null = null;
 	private currentAudio: HTMLAudioElement | null = null;
 	private isPlaying = false;
 	private autoHideTimer: NodeJS.Timeout | null = null;
+	private wakeStatusBarItem: HTMLElement | null = null;
 	
 	// 持续对话状态管理
 	private isInContinuousDialog = false;
@@ -231,10 +230,12 @@ export default class VoiceAssistantPlugin extends Plugin {
 		// 添加设置面板
 		this.addSettingTab(new VoiceAssistantSettingTab(this.app, this));
 
-		// 创建状态浮窗
-		this.createStatusFloat();
-		this.showStatusFloat();
-		this.updateStatusFloat('语音助手已加载 - 停止监听', 'info');
+		// 等待工作区布局就绪后再操作全局 DOM，避免影响 Obsidian 启动阶段。
+		this.app.workspace.onLayoutReady(() => {
+			this.createStatusFloat();
+			this.showStatusFloat();
+			this.updateStatusFloat('语音助手已加载 - 停止监听', 'info');
+		});
 
 		// 插件加载后默认为停止监听状态，用户需要手动启动监听
 		// 不再自动启动语音唤醒监听
@@ -249,7 +250,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.stopListening();
 		this.stopWakeListening();
 		this.stopTTS();
-		
+
 		// 清理自动隐藏定时器
 		if (this.autoHideTimer) {
 			clearTimeout(this.autoHideTimer);
@@ -263,6 +264,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		}
 		
 		this.removeStatusFloat();
+		this.wakeStatusBarItem = null;
 		this.debugLog('语音助手插件已卸载');
 	}
 
@@ -284,27 +286,24 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 * 调试日志输出
 	 */
 	private debugLog(message: string, ...args: any[]) {
-		if (this.settings.enableDebugLog) {
-			console.log(`[语音助手] ${message}`, ...args);
-		}
+		// 生产版本不向控制台输出笔记、音频、凭据或第三方响应。
+		// 保留该方法以兼容现有调用点，并避免泄露用户内容。
+		void message;
+		void args;
 	}
 
 	/**
 	 * 测试TTS功能
 	 */
 	async testTTS() {
-		console.log('[语音助手] 开始TTS测试...');
 		new Notice('开始TTS测试...');
 		
 		try {
 			const testText = '这是一个TTS功能测试，如果你能听到这段话，说明TTS功能正常工作。';
-			console.log('[语音助手] 测试文本:', testText);
 			
 			await this.textToSpeech(testText);
-			console.log('[语音助手] TTS测试完成');
 			new Notice('TTS测试完成');
 		} catch (error) {
-			console.error('[语音助手] TTS测试失败:', error);
 			new Notice(`TTS测试失败: ${error.message}`);
 		}
 	}
@@ -849,11 +848,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 		let statusNotice: Notice | null = null;
 		
 		try {
-			console.log('[语音助手] 开始语音朗读流程');
 			
 			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 			if (!activeView) {
-				console.log('[语音助手] 没有活动的笔记视图');
 				this.updateStatusFloat('没有活动的笔记视图', 'error');
 				return;
 			}
@@ -865,55 +862,43 @@ export default class VoiceAssistantPlugin extends Plugin {
 			const selectedText = editor.getSelection();
 			if (selectedText.trim()) {
 				textToRead = selectedText.trim();
-				console.log('[语音助手] 朗读选中文字，长度:', textToRead.length);
-				console.log('[语音助手] 选中文字内容:', textToRead.substring(0, 100) + (textToRead.length > 100 ? '...' : ''));
 				this.updateStatusFloat(`准备朗读选中文字 (${textToRead.length}字符)`, 'info');
 				statusNotice = new Notice('正在朗读选中文字...', 4000);
 			} else {
 				// 朗读整篇笔记
 				textToRead = editor.getValue().trim();
-				console.log('[语音助手] 朗读整篇笔记，长度:', textToRead.length);
-				console.log('[语音助手] 笔记内容预览:', textToRead.substring(0, 100) + (textToRead.length > 100 ? '...' : ''));
 				this.updateStatusFloat(`准备朗读整篇笔记 (${textToRead.length}字符)`, 'info');
 				statusNotice = new Notice('正在朗读整篇笔记...', 4000);
 			}
 			
 			if (!textToRead) {
-				console.log('[语音助手] 没有可朗读的内容');
 				this.updateStatusFloat('没有可朗读的内容', 'warning');
 				return;
 			}
 			
 			// 移除 Markdown 标记，只保留纯文本
 			const cleanText = this.cleanMarkdownText(textToRead);
-			console.log('[语音助手] 清理后的文本长度:', cleanText.length);
-			console.log('[语音助手] 清理后文本预览:', cleanText.substring(0, 100) + (cleanText.length > 100 ? '...' : ''));
-			console.log('[语音助手] TTS模式:', this.settings.ttsMode);
 			this.updateStatusFloat(`文本处理完成，准备合成语音 (${cleanText.length}字符)`, 'info');
 			
 			this.debugLog('开始语音朗读，文本长度:', cleanText.length);
 			
 			// 根据设置选择合成方式
 			if (this.settings.ttsMode === 'online') {
-				console.log('[语音助手] 使用在线TTS');
 				const providerName = '讯飞';
 				this.updateStatusFloat(`正在连接${providerName}在线TTS服务...`, 'info');
 				await this.textToSpeech(cleanText);
 
 			} else {
-				console.log('[语音助手] TTS未启用，当前模式:', this.settings.ttsMode);
 				this.updateStatusFloat('TTS功能未启用', 'error');
 				if (statusNotice) statusNotice.hide();
 				return;
 			}
 			
 			// 朗读完成
-			console.log('[语音助手] 朗读流程完成');
 			if (statusNotice) statusNotice.hide();
 			this.updateStatusFloat('语音朗读流程完成', 'success');
 			
 		} catch (error) {
-			console.error('[语音助手] 语音朗读错误:', error);
 			this.debugLog('语音朗读错误:', error);
 			if (statusNotice) statusNotice.hide();
 			const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1223,7 +1208,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 			const model = this.settings.googleModel || 'gemini-2.5-flash';
 			this.debugLog(`调用 Google AI 模型: ${model}`);
 			
-			const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.settings.googleApiKey}`, {
+			const response = await requestUrl({
+				url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.settings.googleApiKey)}`,
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -1232,16 +1218,17 @@ export default class VoiceAssistantPlugin extends Plugin {
 					contents: [{
 						parts: [{ text: text }]
 					}]
-				})
+				}),
+				throw: false
 			});
 
-			if (!response.ok) {
-				const errorText = await response.text();
+			if (response.status < 200 || response.status >= 300) {
+				const errorText = response.text;
 				this.debugLog(`Google AI API 错误 (${response.status}):`, errorText);
 				throw new Error(`Google AI API 调用失败: ${response.status} - ${errorText}`);
 			}
 
-			const data = await response.json();
+			const data = response.json;
 			this.debugLog('Google AI 完整响应:', data);
 			
 			// 检查是否有错误信息
@@ -1277,7 +1264,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private async callOpenRouter(text: string): Promise<string> {
 		try {
 			const model = this.settings.openrouterModel || 'openai/gpt-3.5-turbo';
-			const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+			const response = await requestUrl({
+				url: 'https://openrouter.ai/api/v1/chat/completions',
 				method: 'POST',
 				headers: {
 					'Authorization': `Bearer ${this.settings.openrouterApiKey}`,
@@ -1286,10 +1274,15 @@ export default class VoiceAssistantPlugin extends Plugin {
 				body: JSON.stringify({
 					model: model,
 					messages: [{ role: 'user', content: text }]
-				})
+				}),
+				throw: false
 			});
 
-			const data = await response.json();
+			if (response.status < 200 || response.status >= 300) {
+				throw new Error(`OpenRouter API 错误: ${response.status}`);
+			}
+
+			const data = response.json;
 			
 			// 检查响应格式
 			if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
@@ -1538,7 +1531,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 		try {
 			this.debugLog(`调用自定义 Google AI 模型: ${modelId}`);
 			
-			const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${this.settings.googleApiKey}`, {
+			const response = await requestUrl({
+				url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(this.settings.googleApiKey)}`,
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -1549,16 +1543,17 @@ export default class VoiceAssistantPlugin extends Plugin {
 							text: text
 						}]
 					}]
-				})
+				}),
+				throw: false
 			});
 
-			if (!response.ok) {
-				const errorText = await response.text();
+			if (response.status < 200 || response.status >= 300) {
+				const errorText = response.text;
 				this.debugLog(`自定义Google AI API 错误 (${response.status}):`, errorText);
 				throw new Error(`自定义Google AI API 调用失败: ${response.status} - ${errorText}`);
 			}
 
-			const data = await response.json();
+			const data = response.json;
 			this.debugLog('自定义Google AI 完整响应:', data);
 			
 			// 检查是否有错误信息
@@ -1597,7 +1592,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 		}
 
 		try {
-			const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+			const response = await requestUrl({
+				url: 'https://openrouter.ai/api/v1/chat/completions',
 				method: 'POST',
 				headers: {
 					'Authorization': `Bearer ${this.settings.openrouterApiKey}`,
@@ -1611,14 +1607,15 @@ export default class VoiceAssistantPlugin extends Plugin {
 							content: text
 						}
 					]
-				})
+				}),
+				throw: false
 			});
 
-			if (!response.ok) {
+			if (response.status < 200 || response.status >= 300) {
 				throw new Error(`OpenRouter API 错误: ${response.status}`);
 			}
 
-			const data = await response.json();
+			const data = response.json;
 			
 			// 检查响应格式
 			if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
@@ -1792,7 +1789,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 */
 	private async xunfeiOnlineTTS(text: string): Promise<void> {
 		try {
-			console.log('[语音助手] 开始讯飞在线TTS，文本:', text.substring(0, 50) + '...');
 			
 			// 构建 TTS 请求
 			const host = 'tts-api.xfyun.cn';
@@ -1801,7 +1797,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 			const apiSecret = this.settings.xunfeiApiSecret;
 			const appId = this.settings.xunfeiAppId;
 			
-			console.log('[语音助手] API配置 - AppId:', appId, 'ApiKey:', apiKey ? '已设置' : '未设置', 'ApiSecret:', apiSecret ? '已设置' : '未设置');
 			
 			// 生成鉴权参数 - 按照讯飞官方文档格式
 			const date = new Date().toUTCString();
@@ -1821,7 +1816,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 				let hasReceivedData = false;
 				
 				ws.onopen = () => {
-					console.log('[语音助手] 讯飞TTS WebSocket 连接已建立');
 					this.debugLog('讯飞TTS WebSocket 连接已建立');
 					const params = {
 						common: { app_id: appId },
@@ -1840,7 +1834,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 							text: btoa(unescape(encodeURIComponent(text))) 
 						}
 					};
-					console.log('[语音助手] 发送TTS参数:', JSON.stringify(params, null, 2));
 					this.debugLog('发送TTS参数:', JSON.stringify(params, null, 2));
 					ws.send(JSON.stringify(params));
 				};
@@ -1848,11 +1841,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 				ws.onmessage = (event: MessageEvent) => {
 					try {
 						const data = JSON.parse(event.data);
-						console.log('[语音助手] 收到TTS响应:', JSON.stringify(data, null, 2));
 						this.debugLog('收到TTS响应:', JSON.stringify(data, null, 2));
 						
 						if (data.code !== 0) {
-							console.error('[语音助手] TTS错误代码:', data.code, '错误信息:', data.message);
 							this.debugLog('TTS错误代码:', data.code, '错误信息:', data.message);
 							reject(new Error(`TTS错误: ${data.code} - ${data.message}`));
 							return;
@@ -1861,47 +1852,37 @@ export default class VoiceAssistantPlugin extends Plugin {
 						if (data.data && data.data.audio) {
 							hasReceivedData = true;
 							audioChunks.push(data.data.audio);
-							console.log('[语音助手] 收到音频数据块，大小:', data.data.audio.length);
 							this.debugLog('收到音频数据块，大小:', data.data.audio.length);
 						}
 						
 						if (data.data && data.data.status === 2) {
-							console.log('[语音助手] TTS合成完成，音频块数量:', audioChunks.length);
 							this.debugLog('TTS合成完成，音频块数量:', audioChunks.length);
 							ws.close();
 							if (audioChunks.length > 0) {
 								// 正确拼接Base64音频数据
 								const combinedAudio = audioChunks.join('');
-								console.log('[语音助手] 拼接后的音频数据长度:', combinedAudio.length);
 								this.debugLog('拼接后的音频数据长度:', combinedAudio.length);
 								
 								// 验证Base64格式
 								if (!combinedAudio || combinedAudio.length === 0) {
-									console.error('[语音助手] 音频数据为空');
 									reject(new Error('音频数据为空'));
 									return;
 								}
 								
 								// 检查是否为有效的Base64字符串
 								if (!/^[A-Za-z0-9+/]*={0,2}$/.test(combinedAudio)) {
-									console.error('[语音助手] 接收到的音频数据不是有效的Base64格式');
-									console.error('[语音助手] 音频数据前100字符:', combinedAudio.substring(0, 100));
 									reject(new Error('接收到的音频数据格式无效'));
 									return;
 								}
 								
 								// 等待音频播放完成
-								console.log('[语音助手] 开始播放音频');
 								this.playAudioFromBase64(combinedAudio).then(() => {
-									console.log('[语音助手] 音频播放成功完成');
 									resolve();
 								}).catch((error) => {
-									console.error('[语音助手] 音频播放失败:', error);
 									this.debugLog('音频播放失败:', error);
 									reject(error);
 								});
 							} else {
-								console.log('[语音助手] 没有收到音频数据');
 								this.debugLog('没有收到音频数据');
 								resolve();
 							}
@@ -1944,7 +1925,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private async playAudioFromBase64(base64Audio: string): Promise<void> {
 		return new Promise((resolve, reject) => {
 			try {
-				console.log('[语音助手] 开始播放音频，base64长度:', base64Audio.length);
 				this.debugLog('开始播放音频，base64长度:', base64Audio.length);
 				
 				// 清理和验证Base64字符串
@@ -1955,26 +1935,20 @@ export default class VoiceAssistantPlugin extends Plugin {
 					cleanBase64 += '=';
 				}
 				
-				console.log('[语音助手] 清理后的base64长度:', cleanBase64.length);
 				this.debugLog('清理后的base64长度:', cleanBase64.length);
 				
 				// 验证Base64格式
 				if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
-					console.error('[语音助手] 无效的Base64格式');
-					console.error('[语音助手] Base64前100字符:', cleanBase64.substring(0, 100));
 					throw new Error('无效的Base64格式');
 				}
 				
 				// 将base64转换为ArrayBuffer (MP3格式)
-				console.log('[语音助手] 开始Base64解码 (MP3格式)');
 				this.debugLog('Base64前50字符:', cleanBase64.substring(0, 50));
 				
 				let binaryString;
 				try {
 					binaryString = atob(cleanBase64);
 				} catch (decodeError) {
-					console.error('[语音助手] Base64解码失败:', decodeError);
-					console.error('[语音助手] 问题Base64数据:', cleanBase64.substring(0, 200));
 					throw new Error(`Base64解码失败: ${decodeError.message}`);
 				}
 				
@@ -1984,13 +1958,11 @@ export default class VoiceAssistantPlugin extends Plugin {
 					mp3Data[i] = binaryString.charCodeAt(i);
 				}
 				
-				console.log('[语音助手] MP3音频数据转换完成，字节长度:', mp3Data.length);
 				this.debugLog('MP3音频数据转换完成，字节长度:', mp3Data.length);
 				
 				// 创建MP3音频Blob
 				const audioBlob = new Blob([mp3Data], { type: 'audio/mpeg' });
 				const audioUrl = URL.createObjectURL(audioBlob);
-				console.log('[语音助手] 音频URL创建完成:', audioUrl);
 				const audio = new Audio(audioUrl);
 				
 				// 设置当前音频对象
@@ -2000,32 +1972,27 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				// 添加音频事件监听器
 				audio.onloadeddata = () => {
-					console.log('[语音助手] 音频数据加载完成');
 					this.debugLog('音频数据加载完成');
 					this.updateStatusFloat('音频数据加载完成', 'success');
 				};
 				
 				audio.oncanplay = () => {
-					console.log('[语音助手] 音频可以播放');
 					this.debugLog('音频可以播放');
 					this.updateStatusFloat('音频准备就绪', 'success');
 				};
 				
 				audio.onplay = () => {
-					console.log('[语音助手] 音频开始播放');
 					this.debugLog('音频开始播放');
 					this.updateStatusFloat('开始播放语音', 'info');
 					this.isPlaying = true;
 				};
 				
 				audio.onpause = () => {
-					console.log('[语音助手] 音频暂停');
 					this.updateStatusFloat('音频已暂停', 'info');
 					this.isPlaying = false;
 				};
 				
 				audio.onended = () => {
-					console.log('[语音助手] 音频播放结束');
 					this.debugLog('音频播放结束');
 					this.updateStatusFloat('语音播放完成', 'success');
 					URL.revokeObjectURL(audioUrl);
@@ -2036,7 +2003,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 				};
 				
 				audio.onerror = (error) => {
-					console.error('[语音助手] 音频播放错误:', error);
 					this.debugLog('音频播放错误:', error);
 					this.updateStatusFloat('音频播放失败', 'error');
 					URL.revokeObjectURL(audioUrl);
@@ -2047,15 +2013,11 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				// 设置音量
 				audio.volume = 1.0;
-				console.log('[语音助手] 音频音量设置为:', audio.volume);
 				
 				// 开始播放
-				console.log('[语音助手] 尝试播放音频');
 				audio.play().then(() => {
-					console.log('[语音助手] 音频播放命令执行成功');
 					this.debugLog('音频播放命令执行成功');
 				}).catch((error) => {
-					console.error('[语音助手] 音频播放命令执行失败:', error);
 					this.debugLog('音频播放命令执行失败:', error);
 					reject(error);
 				});
@@ -2078,7 +2040,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 				}
 				
 			} catch (error) {
-				console.error('[语音助手] 播放音频错误:', error);
 				this.debugLog('播放音频错误:', error);
 				reject(error);
 			}
@@ -2462,11 +2423,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 		}
 		
 		// 停止离线语音唤醒进程
-		if (this.wakeProcess) {
-			this.wakeProcess.kill();
-			this.wakeProcess = null;
-		}
-		
 		// 停止WebSocket连接
 		if (this.wakeWebSocket) {
 			this.wakeWebSocket.close();
@@ -2855,7 +2811,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				ws.onerror = (error) => {
 					this.updateStatusFloat('WebSocket连接错误', 'error');
-					console.error('[TTS调试] WebSocket错误:', error);
+					this.debugLog('TTS WebSocket 错误:', error);
 				};
 				
 				ws.onclose = (event) => {
@@ -2877,7 +2833,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 			}
 			
 		} catch (error) {
-			console.error('[TTS调试] 调试失败:', error);
 			this.updateStatusFloat('TTS调试失败: ' + (error instanceof Error ? error.message : String(error)), 'error');
 		}
 	}
@@ -2892,44 +2847,20 @@ export default class VoiceAssistantPlugin extends Plugin {
 		// 创建浮窗容器
 		this.statusFloat = document.createElement('div');
 		this.statusFloat.className = 'voice-assistant-status-float';
-		
-		// 设置浮窗样式
-		this.statusFloat.style.cssText = `
-			position: fixed;
-			bottom: 20px;
-			right: 20px;
-			width: 280px;
-			max-height: 200px;
-			background: var(--background-primary);
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 8px;
-			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-			z-index: 1000;
-			font-size: 12px;
-			overflow: hidden;
-			display: block;
-		`;
 
 		// 创建标题栏
 		const header = document.createElement('div');
-		header.style.cssText = `
-			padding: 8px 12px;
-			background: var(--background-secondary);
-			border-bottom: 1px solid var(--background-modifier-border);
-			font-weight: 600;
-			display: flex;
-			justify-content: space-between;
-			align-items: center;
-			cursor: move;
-			user-select: none;
-		`;
-		header.textContent = '语音助手';
+		header.className = 'voice-assistant-status-header';
+		const titleEl = document.createElement('span');
+		titleEl.className = 'voice-assistant-status-title';
+		titleEl.textContent = '语音助手';
+		header.appendChild(titleEl);
 
 		// 添加拖拽功能
 		let isDragging = false;
 		let dragOffset = { x: 0, y: 0 };
 
-		header.addEventListener('mousedown', (e: MouseEvent) => {
+		this.registerDomEvent(header, 'mousedown', (e: MouseEvent) => {
 			isDragging = true;
 			const rect = this.statusFloat!.getBoundingClientRect();
 			dragOffset.x = e.clientX - rect.left;
@@ -2939,7 +2870,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			e.preventDefault();
 		});
 
-		document.addEventListener('mousemove', (e: MouseEvent) => {
+		this.registerDomEvent(document, 'mousemove', (e: MouseEvent) => {
 			if (!isDragging || !this.statusFloat) return;
 			
 			const x = e.clientX - dragOffset.x;
@@ -2952,78 +2883,43 @@ export default class VoiceAssistantPlugin extends Plugin {
 			const constrainedX = Math.max(0, Math.min(x, maxX));
 			const constrainedY = Math.max(0, Math.min(y, maxY));
 			
-			this.statusFloat.style.left = constrainedX + 'px';
-			this.statusFloat.style.top = constrainedY + 'px';
-			this.statusFloat.style.right = 'auto';
-			this.statusFloat.style.bottom = 'auto';
+			this.statusFloat.addClass('is-dragged');
+			this.statusFloat.setCssProps({
+				'--voice-assistant-left': `${constrainedX}px`,
+				'--voice-assistant-top': `${constrainedY}px`
+			});
 		});
 
-		document.addEventListener('mouseup', () => {
+		this.registerDomEvent(document, 'mouseup', () => {
 			isDragging = false;
 		});
 
 		// 创建关闭按钮
 		const closeBtn = document.createElement('button');
 		closeBtn.textContent = '×';
-		closeBtn.style.cssText = `
-			background: none;
-			border: none;
-			font-size: 16px;
-			cursor: pointer;
-			padding: 0;
-			width: 20px;
-			height: 20px;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-		`;
+		closeBtn.className = 'voice-assistant-close-button';
+		closeBtn.setAttribute('aria-label', '关闭语音助手状态');
 		closeBtn.onclick = () => this.hideStatusFloat();
 		header.appendChild(closeBtn);
 
 		// 创建内容区域
 		const content = document.createElement('div');
 		content.className = 'voice-assistant-content';
-		content.style.cssText = `
-			padding: 8px 12px;
-			max-height: 120px;
-			overflow-y: auto;
-		`;
 
 		// 创建控制按钮区域
 		const controls = document.createElement('div');
 		controls.className = 'voice-assistant-controls';
-		controls.style.cssText = `
-			padding: 8px 12px;
-			border-top: 1px solid var(--background-modifier-border);
-			display: flex;
-			gap: 8px;
-			justify-content: center;
-		`;
 
 		// 暂停/继续按钮
 		const playPauseBtn = document.createElement('button');
 		playPauseBtn.textContent = '⏸️ 暂停';
-		playPauseBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 4px;
-			background: var(--background-primary);
-			cursor: pointer;
-			font-size: 11px;
-		`;
+		playPauseBtn.className = 'voice-assistant-control-button';
 		playPauseBtn.onclick = () => this.toggleTTSPlayback();
 
 		// 停止按钮
 		const stopBtn = document.createElement('button');
 		stopBtn.textContent = '⏹️ 停止';
-		stopBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 4px;
-			background: var(--background-primary);
-			cursor: pointer;
-			font-size: 11px;
-		`;
+		stopBtn.className = 'voice-assistant-control-button';
 		stopBtn.onclick = () => this.stopTTS();
 
 		controls.appendChild(playPauseBtn);
@@ -3031,34 +2927,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 
 		// 结束对话按钮（仅在持续对话模式下显示）
 		const endDialogBtn = document.createElement('button');
-		endDialogBtn.className = 'end-dialog-btn';
+		endDialogBtn.className = 'voice-assistant-control-button end-dialog-btn is-hidden';
 		endDialogBtn.textContent = '🔚 结束对话';
-		endDialogBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--color-red);
-			border-radius: 4px;
-			background: var(--color-red);
-			color: white;
-			cursor: pointer;
-			font-size: 11px;
-			display: none;
-		`;
 		endDialogBtn.onclick = () => this.endContinuousDialogWithSummary();
 
 		// 停止听写按钮（仅在听写模式下显示）
 		const stopDictationBtn = document.createElement('button');
-		stopDictationBtn.className = 'stop-dictation-btn';
+		stopDictationBtn.className = 'voice-assistant-control-button stop-dictation-btn is-hidden';
 		stopDictationBtn.textContent = '⏹️ 停止听写';
-		stopDictationBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--color-orange);
-			border-radius: 4px;
-			background: var(--color-orange);
-			color: white;
-			cursor: pointer;
-			font-size: 11px;
-			display: none;
-		`;
 		stopDictationBtn.onclick = () => this.stopDictation();
 
 		controls.appendChild(endDialogBtn);
@@ -3088,7 +2964,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 */
 	private showStatusFloat(): void {
 		if (this.statusFloat) {
-			this.statusFloat.style.display = 'block';
+			this.statusFloat.removeClass('is-hidden');
 		}
 	}
 
@@ -3097,7 +2973,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 */
 	private hideStatusFloat(): void {
 		if (this.statusFloat) {
-			this.statusFloat.style.display = 'none';
+			this.statusFloat.addClass('is-hidden');
 		}
 	}
 
@@ -3112,23 +2988,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 
 		const timestamp = new Date().toLocaleTimeString();
 		const messageDiv = document.createElement('div');
-		messageDiv.style.cssText = `
-			margin-bottom: 4px;
-			padding: 2px 0;
-			border-bottom: 1px solid var(--background-modifier-border-hover);
-		`;
-
-		const typeColors = {
-			info: 'var(--text-muted)',
-			success: 'var(--text-success)',
-			error: 'var(--text-error)',
-			warning: 'var(--text-warning)'
-		};
-
-		messageDiv.innerHTML = `
-			<span style="color: ${typeColors[type]}; font-weight: 500;">[${timestamp}]</span>
-			<span style="margin-left: 8px;">${message}</span>
-		`;
+		messageDiv.className = 'voice-assistant-status-message';
+		const timestampEl = document.createElement('span');
+		timestampEl.className = `voice-assistant-status-timestamp is-${type}`;
+		timestampEl.textContent = `[${timestamp}]`;
+		const messageEl = document.createElement('span');
+		messageEl.className = 'voice-assistant-status-message-text';
+		messageEl.textContent = message;
+		messageDiv.append(timestampEl, messageEl);
 
 		content.appendChild(messageDiv);
 		content.scrollTop = content.scrollHeight;
@@ -3180,20 +3047,15 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 * 更新唤醒状态指示器
 	 */
 	private updateWakeStatus(isActive: boolean): void {
-		// 在状态栏显示唤醒状态
-		const statusBarItem = this.addStatusBarItem();
-		statusBarItem.setText(isActive ? '🎤 唤醒监听中' : '🔇 唤醒已停止');
-		statusBarItem.title = isActive ? '语音唤醒正在监听中' : '语音唤醒已停止';
-		
-		// 设置样式
-		statusBarItem.style.color = isActive ? 'var(--text-success)' : 'var(--text-muted)';
-		
-		// 如果唤醒停止，3秒后移除状态栏项目
-		if (!isActive) {
-			setTimeout(() => {
-				statusBarItem.remove();
-			}, 3000);
+		// 复用同一个状态栏元素，避免重复切换时不断创建 DOM 节点。
+		if (!this.wakeStatusBarItem) {
+			this.wakeStatusBarItem = this.addStatusBarItem();
+			this.wakeStatusBarItem.addClass('voice-assistant-status-bar');
 		}
+		this.wakeStatusBarItem.setText(isActive ? '🎤 唤醒监听中' : '🔇 唤醒已停止');
+		this.wakeStatusBarItem.title = isActive ? '语音唤醒正在监听中' : '语音唤醒已停止';
+		this.wakeStatusBarItem.toggleClass('is-active', isActive);
+		this.wakeStatusBarItem.toggleClass('is-inactive', !isActive);
 		
 		this.debugLog(`唤醒状态更新: ${isActive ? '激活' : '停止'}`);
 	}
@@ -3343,14 +3205,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 		if (this.statusFloat) {
 			const endDialogBtn = this.statusFloat.querySelector('.end-dialog-btn') as HTMLButtonElement;
 			if (endDialogBtn) {
-				endDialogBtn.style.display = 'inline-block';
+				endDialogBtn.removeClass('is-hidden');
 			}
 			
 			// 更新状态浮窗标题显示持续对话状态
-			const header = this.statusFloat.querySelector('div') as HTMLElement;
-			if (header) {
-				header.textContent = '语音助手 - 持续对话中';
-				header.style.color = 'var(--color-accent)';
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			if (title) {
+				title.textContent = '语音助手 - 持续对话中';
+				title.addClass('is-active');
 			}
 		}
 	}
@@ -3363,14 +3225,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 		if (this.statusFloat) {
 			const endDialogBtn = this.statusFloat.querySelector('.end-dialog-btn') as HTMLButtonElement;
 			if (endDialogBtn) {
-				endDialogBtn.style.display = 'none';
+				endDialogBtn.addClass('is-hidden');
 			}
 			
 			// 恢复状态浮窗标题
-			const header = this.statusFloat.querySelector('div') as HTMLElement;
-			if (header) {
-				header.textContent = '语音助手';
-				header.style.color = '';
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			if (title) {
+				title.textContent = '语音助手';
+				title.removeClass('is-active');
 			}
 		}
 	}
@@ -3383,14 +3245,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 		if (this.statusFloat) {
 			const stopDictationBtn = this.statusFloat.querySelector('.stop-dictation-btn') as HTMLButtonElement;
 			if (stopDictationBtn) {
-				stopDictationBtn.style.display = 'inline-block';
+				stopDictationBtn.removeClass('is-hidden');
 			}
 			
 			// 更新状态浮窗标题显示听写状态
-			const header = this.statusFloat.querySelector('div') as HTMLElement;
-			if (header) {
-				header.textContent = '语音助手 - 听写中';
-				header.style.color = 'var(--color-accent)';
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			if (title) {
+				title.textContent = '语音助手 - 听写中';
+				title.addClass('is-active');
 			}
 		}
 	}
@@ -3403,14 +3265,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 		if (this.statusFloat) {
 			const stopDictationBtn = this.statusFloat.querySelector('.stop-dictation-btn') as HTMLButtonElement;
 			if (stopDictationBtn) {
-				stopDictationBtn.style.display = 'none';
+				stopDictationBtn.addClass('is-hidden');
 			}
 			
 			// 恢复状态浮窗标题
-			const header = this.statusFloat.querySelector('div') as HTMLElement;
-			if (header) {
-				header.textContent = '语音助手';
-				header.style.color = '';
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			if (title) {
+				title.textContent = '语音助手';
+				title.removeClass('is-active');
 			}
 		}
 	}
@@ -3945,11 +3807,10 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-
-		containerEl.createEl('h2', { text: '语音助手设置' });
+		containerEl.addClass('voice-assistant-settings');
 
 		// LLM 配置
-		containerEl.createEl('h3', { text: 'LLM 配置' });
+		new Setting(containerEl).setName('LLM').setHeading();
 		
 		new Setting(containerEl)
 			.setName('LLM 提供商')
@@ -3969,24 +3830,28 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Google API Key')
 			.setDesc('Google AI Studio API 密钥')
-			.addText(text => text
-				.setPlaceholder('输入 Google API Key')
-				.setValue(this.plugin.settings.googleApiKey)
-				.onChange(async (value) => {
+			.addText(text => {
+				text.inputEl.type = 'password';
+				text.setPlaceholder('输入 Google API Key')
+					.setValue(this.plugin.settings.googleApiKey)
+					.onChange(async (value) => {
 					this.plugin.settings.googleApiKey = value;
 					await this.plugin.saveSettings();
-				}));
+					});
+			});
 
 		new Setting(containerEl)
 			.setName('OpenRouter API Key')
 			.setDesc('OpenRouter API 密钥')
-			.addText(text => text
-				.setPlaceholder('输入 OpenRouter API Key')
-				.setValue(this.plugin.settings.openrouterApiKey)
-				.onChange(async (value) => {
+			.addText(text => {
+				text.inputEl.type = 'password';
+				text.setPlaceholder('输入 OpenRouter API Key')
+					.setValue(this.plugin.settings.openrouterApiKey)
+					.onChange(async (value) => {
 					this.plugin.settings.openrouterApiKey = value;
 					await this.plugin.saveSettings();
-				}));
+					});
+			});
 
 		new Setting(containerEl)
 			.setName('讯飞 App ID')
@@ -4002,24 +3867,28 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('讯飞 API Key')
 			.setDesc('讯飞开放平台 API Key')
-			.addText(text => text
-				.setPlaceholder('输入讯飞 API Key')
-				.setValue(this.plugin.settings.xunfeiApiKey)
-				.onChange(async (value) => {
+			.addText(text => {
+				text.inputEl.type = 'password';
+				text.setPlaceholder('输入讯飞 API Key')
+					.setValue(this.plugin.settings.xunfeiApiKey)
+					.onChange(async (value) => {
 					this.plugin.settings.xunfeiApiKey = value;
 					await this.plugin.saveSettings();
-				}));
+					});
+			});
 
 		new Setting(containerEl)
 			.setName('讯飞 API Secret')
 			.setDesc('讯飞开放平台 API Secret')
-			.addText(text => text
-				.setPlaceholder('输入讯飞 API Secret')
-				.setValue(this.plugin.settings.xunfeiApiSecret)
-				.onChange(async (value) => {
+			.addText(text => {
+				text.inputEl.type = 'password';
+				text.setPlaceholder('输入讯飞 API Secret')
+					.setValue(this.plugin.settings.xunfeiApiSecret)
+					.onChange(async (value) => {
 					this.plugin.settings.xunfeiApiSecret = value;
 					await this.plugin.saveSettings();
-				}));
+					});
+			});
 
 
 
@@ -4028,7 +3897,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 
 
 		// 模型选择配置
-		containerEl.createEl('h3', { text: '模型选择' });
+		new Setting(containerEl).setName('模型').setHeading();
 
 		new Setting(containerEl)
 			.setName('Google 模型')
@@ -4086,13 +3955,12 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 
 
 		// 自定义模型配置
-		containerEl.createEl('h3', { text: '自定义模型' });
+		new Setting(containerEl).setName('自定义模型').setHeading();
 		
 		const customModelsDesc = containerEl.createEl('p', { 
 			text: '您可以添加自定义模型配置，支持Google AI Studio、OpenRouter和讯飞星火提供商' 
 		});
-		customModelsDesc.style.fontSize = '0.9em';
-		customModelsDesc.style.color = 'var(--text-muted)';
+		customModelsDesc.addClass('voice-assistant-muted-description');
 
 		// 当前选择的自定义模型
 		const customModelSetting = new Setting(containerEl)
@@ -4118,7 +3986,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 
 		// 添加新的自定义模型
 		const addCustomModelContainer = containerEl.createDiv();
-		addCustomModelContainer.createEl('h4', { text: '添加新的自定义模型' });
+		new Setting(addCustomModelContainer).setName('添加新的自定义模型').setHeading();
 
 		let newModelName = '';
 		let newModelProvider = 'google';
@@ -4193,42 +4061,32 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 
 		// 现有自定义模型列表
 		const existingModelsContainer = containerEl.createDiv();
-		existingModelsContainer.createEl('h4', { text: '现有自定义模型' });
+		new Setting(existingModelsContainer).setName('现有自定义模型').setHeading();
 
 		const updateExistingModelsList = () => {
 			existingModelsContainer.empty();
-			existingModelsContainer.createEl('h4', { text: '现有自定义模型' });
+			new Setting(existingModelsContainer).setName('现有自定义模型').setHeading();
 
 			if (this.plugin.settings.customModels.length === 0) {
 				existingModelsContainer.createEl('p', { 
 					text: '暂无自定义模型',
-					attr: { style: 'color: var(--text-muted); font-style: italic;' }
+					cls: 'voice-assistant-empty-state'
 				});
 				return;
 			}
 
 			this.plugin.settings.customModels.forEach((model, index) => {
-				const modelContainer = existingModelsContainer.createDiv();
-				modelContainer.style.border = '1px solid var(--background-modifier-border)';
-				modelContainer.style.borderRadius = '4px';
-				modelContainer.style.padding = '10px';
-				modelContainer.style.marginBottom = '10px';
+				const modelContainer = existingModelsContainer.createDiv('voice-assistant-model-card');
 
-				const modelInfo = modelContainer.createDiv();
-				modelInfo.innerHTML = `
-					<strong>${model.name}</strong><br>
-					<span style="color: var(--text-muted);">提供商: ${model.provider}</span><br>
-					<span style="color: var(--text-muted);">模型ID: ${model.modelId}</span>
-				`;
+				const modelInfo = modelContainer.createDiv('voice-assistant-model-info');
+				modelInfo.createEl('strong', { text: model.name });
+				modelInfo.createDiv({ text: `提供商: ${model.provider}`, cls: 'voice-assistant-model-meta' });
+				modelInfo.createDiv({ text: `模型 ID: ${model.modelId}`, cls: 'voice-assistant-model-meta' });
 
-				const deleteButton = modelContainer.createEl('button', { text: '删除' });
-				deleteButton.style.marginTop = '5px';
-				deleteButton.style.backgroundColor = 'var(--interactive-accent)';
-				deleteButton.style.color = 'white';
-				deleteButton.style.border = 'none';
-				deleteButton.style.borderRadius = '3px';
-				deleteButton.style.padding = '5px 10px';
-				deleteButton.style.cursor = 'pointer';
+				const deleteButton = modelContainer.createEl('button', {
+					text: '删除',
+					cls: 'voice-assistant-delete-button'
+				});
 				
 				deleteButton.addEventListener('click', async () => {
 					this.plugin.settings.customModels.splice(index, 1);
@@ -4249,7 +4107,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		updateExistingModelsList();
 
 		// 语音唤醒配置
-		containerEl.createEl('h3', { text: '语音唤醒配置' });
+		new Setting(containerEl).setName('语音唤醒').setHeading();
 		
 		new Setting(containerEl)
 			.setName('唤醒模式')
@@ -4300,7 +4158,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			}));
 
 		// 语音识别配置
-		containerEl.createEl('h3', { text: '语音识别配置' });
+		new Setting(containerEl).setName('语音识别').setHeading();
 		
 		new Setting(containerEl)
 			.setName('ASR 提供商')
@@ -4316,7 +4174,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 
 
 		// 语音听写配置
-		containerEl.createEl('h3', { text: '语音听写配置' });
+		new Setting(containerEl).setName('语音听写').setHeading();
 		
 
 
@@ -4359,7 +4217,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			}));
 
 		// 语音合成配置
-		containerEl.createEl('h3', { text: '语音合成配置' });
+		new Setting(containerEl).setName('语音合成').setHeading();
 		
 		new Setting(containerEl)
 			.setName('TTS 提供商')
@@ -4394,7 +4252,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		// 根据TTS提供商动态添加选项
 		const updateVoiceOptions = () => {
 			voiceSetting.addDropdown(dropdown => {
-				dropdown.selectEl.innerHTML = ''; // 清空现有选项
+				dropdown.selectEl.empty(); // 清空现有选项
 				
 				if (this.plugin.settings.ttsProvider === 'xunfei') {
 					// 讯飞语音选项
@@ -4525,7 +4383,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 				}));
 
 		// 录音配置
-		containerEl.createEl('h3', { text: '录音配置' });
+		new Setting(containerEl).setName('录音').setHeading();
 		
 		new Setting(containerEl)
 			.setName('采样率')
@@ -4573,7 +4431,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 				}));
 
 		// 持续对话配置
-		containerEl.createEl('h3', { text: '持续对话配置' });
+		new Setting(containerEl).setName('持续对话').setHeading();
 		
 		const dialogDurationSetting = new Setting(containerEl)
 			.setName('持续对话时长')
@@ -4664,13 +4522,15 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			}));
 
 		// 自定义提示词配置
-		containerEl.createEl('h3', { text: '自定义提示词配置' });
+		new Setting(containerEl).setName('自定义提示词').setHeading();
 		
-		const promptsDesc = containerEl.createDiv();
-		promptsDesc.innerHTML = `
-			<p>配置自定义提示词，当用户输入包含触发词时，会自动添加对应的提示词发送给大模型。</p>
-			<p><strong>示例：</strong>触发词"提醒"，提示词"请生成一个Markdown格式的任务提醒"</p>
-		`;
+		const promptsDesc = containerEl.createDiv('voice-assistant-description');
+		promptsDesc.createEl('p', {
+			text: '配置自定义提示词。当输入包含触发词时，插件会把对应提示词一并发送给所选模型。'
+		});
+		const promptExample = promptsDesc.createEl('p');
+		promptExample.createEl('strong', { text: '示例：' });
+		promptExample.appendText('触发词“提醒”，提示词“请生成一个 Markdown 格式的任务提醒”。');
 		
 		// 显示现有提示词
 		this.displayCustomPrompts(containerEl);
@@ -4687,7 +4547,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 				}));
 
 		// 测试功能
-		containerEl.createEl('h3', { text: '测试功能' });
+		new Setting(containerEl).setName('测试').setHeading();
 		
 		new Setting(containerEl)
 			.setName('测试讯飞在线 ASR')
@@ -4743,32 +4603,23 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 					this.plugin.debugTextContent();
 				}));
 
-		// 调试配置
-		containerEl.createEl('h3', { text: '调试配置' });
-		
-		new Setting(containerEl)
-			.setName('启用调试日志')
-			.setDesc('在控制台输出详细的调试信息')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableDebugLog)
-				.onChange(async (value) => {
-					this.plugin.settings.enableDebugLog = value;
-					await this.plugin.saveSettings();
-				}));
-
 		// 帮助信息
-		containerEl.createEl('h3', { text: '帮助信息' });
-		
-		const helpDiv = containerEl.createDiv();
-		helpDiv.innerHTML = `
-			<p><strong>使用说明：</strong></p>
-			<p>1. 访问 <a href="https://www.xfyun.cn/doc/" target="_blank">讯飞开放平台</a> 获取API密钥</p>
-			<p>2. 在上述设置中填写正确的API配置信息</p>
-			<br>
-			<p><strong>注意事项：</strong></p>
-			<p>• 音频数据会发送到讯飞服务器进行处理</p>
-			<p>• 请妥善保管您的 API 密钥，避免泄露</p>
-		`;
+		new Setting(containerEl).setName('帮助').setHeading();
+
+		const helpDiv = containerEl.createDiv('voice-assistant-help');
+		helpDiv.createEl('strong', { text: '使用说明' });
+		const providerHelp = helpDiv.createEl('p');
+		providerHelp.appendText('1. 访问 ');
+		providerHelp.createEl('a', {
+			text: '讯飞开放平台',
+			href: 'https://www.xfyun.cn/doc/',
+			attr: { target: '_blank', rel: 'noopener noreferrer' }
+		});
+		providerHelp.appendText(' 获取 API 凭据。');
+		helpDiv.createEl('p', { text: '2. 在上方设置中填写对应的 API 配置信息。' });
+		helpDiv.createEl('strong', { text: '注意事项' });
+		helpDiv.createEl('p', { text: '• 麦克风音频会发送到讯飞服务器进行处理。' });
+		helpDiv.createEl('p', { text: '• API 凭据会保存在插件数据文件中，请妥善保管。' });
 	}
 
 	/**
@@ -4778,7 +4629,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		container.empty();
 		
 		const wakeWordsDiv = container.createDiv();
-		wakeWordsDiv.createEl('h4', { text: '唤醒词管理' });
+		new Setting(wakeWordsDiv).setName('唤醒词').setHeading();
 		
 		// 显示现有唤醒词
 		this.plugin.settings.wakeWords.forEach((word, index) => {
@@ -4794,7 +4645,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		});
 		
 		// 添加新唤醒词
-		const addDiv = wakeWordsDiv.createDiv();
+		const addDiv = wakeWordsDiv.createDiv('wake-word-add');
 		const input = addDiv.createEl('input', { type: 'text', placeholder: '输入新唤醒词' });
 		const addBtn = addDiv.createEl('button', { text: '添加' });
 		
@@ -4827,22 +4678,12 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		}
 
 		this.plugin.settings.customPrompts.forEach((prompt, index) => {
-			const promptDiv = promptsContainer.createDiv('custom-prompt-item');
-			promptDiv.style.cssText = `
-				border: 1px solid var(--background-modifier-border);
-				border-radius: 6px;
-				padding: 12px;
-				margin: 8px 0;
-				background: var(--background-secondary);
-			`;
+			const promptDiv = promptsContainer.createDiv('voice-assistant-prompt-card');
 
 			// 提示词标题和启用状态
-			const headerDiv = promptDiv.createDiv();
-			headerDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;';
+			const headerDiv = promptDiv.createDiv('voice-assistant-prompt-header');
 			
-			const titleSpan = headerDiv.createEl('span');
-			titleSpan.textContent = prompt.name;
-			titleSpan.style.fontWeight = '500';
+			headerDiv.createEl('span', { text: prompt.name, cls: 'voice-assistant-prompt-title' });
 
 			const enableToggle = headerDiv.createEl('input', { type: 'checkbox' });
 			enableToggle.checked = prompt.enabled;
@@ -4852,35 +4693,31 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			};
 
 			// 触发词
-			const triggerDiv = promptDiv.createDiv();
-			triggerDiv.innerHTML = `<strong>触发词：</strong>${prompt.trigger}`;
-			triggerDiv.style.marginBottom = '8px';
+			const triggerDiv = promptDiv.createDiv('voice-assistant-prompt-trigger');
+			triggerDiv.createEl('strong', { text: '触发词：' });
+			triggerDiv.appendText(prompt.trigger);
 
 			// 提示词内容
-			const promptContentDiv = promptDiv.createDiv();
-			promptContentDiv.innerHTML = `<strong>提示词：</strong>`;
-			const promptText = promptContentDiv.createEl('div');
-			promptText.textContent = prompt.prompt;
-			promptText.style.cssText = `
-				background: var(--background-primary);
-				padding: 8px;
-				border-radius: 4px;
-				margin-top: 4px;
-				font-family: var(--font-monospace);
-				font-size: 0.9em;
-				white-space: pre-wrap;
-			`;
+			const promptContentDiv = promptDiv.createDiv('voice-assistant-prompt-content');
+			promptContentDiv.createEl('strong', { text: '提示词：' });
+			promptContentDiv.createEl('div', {
+				text: prompt.prompt,
+				cls: 'voice-assistant-prompt-text'
+			});
 
 			// 操作按钮
-			const actionsDiv = promptDiv.createDiv();
-			actionsDiv.style.cssText = 'display: flex; gap: 8px; margin-top: 12px;';
+			const actionsDiv = promptDiv.createDiv('voice-assistant-prompt-actions');
 
-			const editBtn = actionsDiv.createEl('button', { text: '编辑' });
-			editBtn.style.cssText = 'padding: 4px 8px; font-size: 0.8em;';
+			const editBtn = actionsDiv.createEl('button', {
+				text: '编辑',
+				cls: 'voice-assistant-prompt-action'
+			});
 			editBtn.onclick = () => this.editCustomPrompt(containerEl, index);
 
-			const deleteBtn = actionsDiv.createEl('button', { text: '删除' });
-			deleteBtn.style.cssText = 'padding: 4px 8px; font-size: 0.8em; background: var(--color-red); color: white;';
+			const deleteBtn = actionsDiv.createEl('button', {
+				text: '删除',
+				cls: ['voice-assistant-prompt-action', 'mod-warning']
+			});
 			deleteBtn.onclick = async () => {
 				this.plugin.settings.customPrompts.splice(index, 1);
 				await this.plugin.saveSettings();

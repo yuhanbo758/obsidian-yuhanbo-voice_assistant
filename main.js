@@ -6658,12 +6658,12 @@ var VoiceAssistantPlugin = class extends import_obsidian.Plugin {
     this.audioChunks = [];
     this.isRecording = false;
     this.isListening = false;
-    this.wakeProcess = null;
     this.wakeWebSocket = null;
     this.statusFloat = null;
     this.currentAudio = null;
     this.isPlaying = false;
     this.autoHideTimer = null;
+    this.wakeStatusBarItem = null;
     // 持续对话状态管理
     this.isInContinuousDialog = false;
     this.conversationHistory = [];
@@ -6750,9 +6750,11 @@ var VoiceAssistantPlugin = class extends import_obsidian.Plugin {
       callback: () => this.startVoiceReading()
     });
     this.addSettingTab(new VoiceAssistantSettingTab(this.app, this));
-    this.createStatusFloat();
-    this.showStatusFloat();
-    this.updateStatusFloat("\u8BED\u97F3\u52A9\u624B\u5DF2\u52A0\u8F7D - \u505C\u6B62\u76D1\u542C", "info");
+    this.app.workspace.onLayoutReady(() => {
+      this.createStatusFloat();
+      this.showStatusFloat();
+      this.updateStatusFloat("\u8BED\u97F3\u52A9\u624B\u5DF2\u52A0\u8F7D - \u505C\u6B62\u76D1\u542C", "info");
+    });
     this.debugLog("\u8BED\u97F3\u52A9\u624B\u63D2\u4EF6\u5DF2\u52A0\u8F7D - \u9ED8\u8BA4\u505C\u6B62\u76D1\u542C\u72B6\u6001");
   }
   /**
@@ -6771,6 +6773,7 @@ var VoiceAssistantPlugin = class extends import_obsidian.Plugin {
       this.silenceCheckTimer = null;
     }
     this.removeStatusFloat();
+    this.wakeStatusBarItem = null;
     this.debugLog("\u8BED\u97F3\u52A9\u624B\u63D2\u4EF6\u5DF2\u5378\u8F7D");
   }
   /**
@@ -6789,24 +6792,17 @@ var VoiceAssistantPlugin = class extends import_obsidian.Plugin {
    * 调试日志输出
    */
   debugLog(message, ...args) {
-    if (this.settings.enableDebugLog) {
-      console.log(`[\u8BED\u97F3\u52A9\u624B] ${message}`, ...args);
-    }
   }
   /**
    * 测试TTS功能
    */
   async testTTS() {
-    console.log("[\u8BED\u97F3\u52A9\u624B] \u5F00\u59CBTTS\u6D4B\u8BD5...");
     new import_obsidian.Notice("\u5F00\u59CBTTS\u6D4B\u8BD5...");
     try {
       const testText = "\u8FD9\u662F\u4E00\u4E2ATTS\u529F\u80FD\u6D4B\u8BD5\uFF0C\u5982\u679C\u4F60\u80FD\u542C\u5230\u8FD9\u6BB5\u8BDD\uFF0C\u8BF4\u660ETTS\u529F\u80FD\u6B63\u5E38\u5DE5\u4F5C\u3002";
-      console.log("[\u8BED\u97F3\u52A9\u624B] \u6D4B\u8BD5\u6587\u672C:", testText);
       await this.textToSpeech(testText);
-      console.log("[\u8BED\u97F3\u52A9\u624B] TTS\u6D4B\u8BD5\u5B8C\u6210");
       new import_obsidian.Notice("TTS\u6D4B\u8BD5\u5B8C\u6210");
     } catch (error) {
-      console.error("[\u8BED\u97F3\u52A9\u624B] TTS\u6D4B\u8BD5\u5931\u8D25:", error);
       new import_obsidian.Notice(`TTS\u6D4B\u8BD5\u5931\u8D25: ${error.message}`);
     }
   }
@@ -7194,10 +7190,8 @@ var VoiceAssistantPlugin = class extends import_obsidian.Plugin {
   async startVoiceReading() {
     let statusNotice = null;
     try {
-      console.log("[\u8BED\u97F3\u52A9\u624B] \u5F00\u59CB\u8BED\u97F3\u6717\u8BFB\u6D41\u7A0B");
       const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
       if (!activeView) {
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u6CA1\u6709\u6D3B\u52A8\u7684\u7B14\u8BB0\u89C6\u56FE");
         this.updateStatusFloat("\u6CA1\u6709\u6D3B\u52A8\u7684\u7B14\u8BB0\u89C6\u56FE", "error");
         return;
       }
@@ -7206,46 +7200,34 @@ var VoiceAssistantPlugin = class extends import_obsidian.Plugin {
       const selectedText = editor.getSelection();
       if (selectedText.trim()) {
         textToRead = selectedText.trim();
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u6717\u8BFB\u9009\u4E2D\u6587\u5B57\uFF0C\u957F\u5EA6:", textToRead.length);
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u9009\u4E2D\u6587\u5B57\u5185\u5BB9:", textToRead.substring(0, 100) + (textToRead.length > 100 ? "..." : ""));
         this.updateStatusFloat(`\u51C6\u5907\u6717\u8BFB\u9009\u4E2D\u6587\u5B57 (${textToRead.length}\u5B57\u7B26)`, "info");
         statusNotice = new import_obsidian.Notice("\u6B63\u5728\u6717\u8BFB\u9009\u4E2D\u6587\u5B57...", 4e3);
       } else {
         textToRead = editor.getValue().trim();
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u6717\u8BFB\u6574\u7BC7\u7B14\u8BB0\uFF0C\u957F\u5EA6:", textToRead.length);
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u7B14\u8BB0\u5185\u5BB9\u9884\u89C8:", textToRead.substring(0, 100) + (textToRead.length > 100 ? "..." : ""));
         this.updateStatusFloat(`\u51C6\u5907\u6717\u8BFB\u6574\u7BC7\u7B14\u8BB0 (${textToRead.length}\u5B57\u7B26)`, "info");
         statusNotice = new import_obsidian.Notice("\u6B63\u5728\u6717\u8BFB\u6574\u7BC7\u7B14\u8BB0...", 4e3);
       }
       if (!textToRead) {
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u6CA1\u6709\u53EF\u6717\u8BFB\u7684\u5185\u5BB9");
         this.updateStatusFloat("\u6CA1\u6709\u53EF\u6717\u8BFB\u7684\u5185\u5BB9", "warning");
         return;
       }
       const cleanText = this.cleanMarkdownText(textToRead);
-      console.log("[\u8BED\u97F3\u52A9\u624B] \u6E05\u7406\u540E\u7684\u6587\u672C\u957F\u5EA6:", cleanText.length);
-      console.log("[\u8BED\u97F3\u52A9\u624B] \u6E05\u7406\u540E\u6587\u672C\u9884\u89C8:", cleanText.substring(0, 100) + (cleanText.length > 100 ? "..." : ""));
-      console.log("[\u8BED\u97F3\u52A9\u624B] TTS\u6A21\u5F0F:", this.settings.ttsMode);
       this.updateStatusFloat(`\u6587\u672C\u5904\u7406\u5B8C\u6210\uFF0C\u51C6\u5907\u5408\u6210\u8BED\u97F3 (${cleanText.length}\u5B57\u7B26)`, "info");
       this.debugLog("\u5F00\u59CB\u8BED\u97F3\u6717\u8BFB\uFF0C\u6587\u672C\u957F\u5EA6:", cleanText.length);
       if (this.settings.ttsMode === "online") {
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u4F7F\u7528\u5728\u7EBFTTS");
         const providerName = "\u8BAF\u98DE";
         this.updateStatusFloat(`\u6B63\u5728\u8FDE\u63A5${providerName}\u5728\u7EBFTTS\u670D\u52A1...`, "info");
         await this.textToSpeech(cleanText);
       } else {
-        console.log("[\u8BED\u97F3\u52A9\u624B] TTS\u672A\u542F\u7528\uFF0C\u5F53\u524D\u6A21\u5F0F:", this.settings.ttsMode);
         this.updateStatusFloat("TTS\u529F\u80FD\u672A\u542F\u7528", "error");
         if (statusNotice)
           statusNotice.hide();
         return;
       }
-      console.log("[\u8BED\u97F3\u52A9\u624B] \u6717\u8BFB\u6D41\u7A0B\u5B8C\u6210");
       if (statusNotice)
         statusNotice.hide();
       this.updateStatusFloat("\u8BED\u97F3\u6717\u8BFB\u6D41\u7A0B\u5B8C\u6210", "success");
     } catch (error) {
-      console.error("[\u8BED\u97F3\u52A9\u624B] \u8BED\u97F3\u6717\u8BFB\u9519\u8BEF:", error);
       this.debugLog("\u8BED\u97F3\u6717\u8BFB\u9519\u8BEF:", error);
       if (statusNotice)
         statusNotice.hide();
@@ -7484,7 +7466,8 @@ GET ${path} HTTP/1.1`;
     try {
       const model = this.settings.googleModel || "gemini-2.5-flash";
       this.debugLog(`\u8C03\u7528 Google AI \u6A21\u578B: ${model}`);
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${this.settings.googleApiKey}`, {
+      const response = await (0, import_obsidian.requestUrl)({
+        url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(this.settings.googleApiKey)}`,
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -7493,14 +7476,15 @@ GET ${path} HTTP/1.1`;
           contents: [{
             parts: [{ text }]
           }]
-        })
+        }),
+        throw: false
       });
-      if (!response.ok) {
-        const errorText = await response.text();
+      if (response.status < 200 || response.status >= 300) {
+        const errorText = response.text;
         this.debugLog(`Google AI API \u9519\u8BEF (${response.status}):`, errorText);
         throw new Error(`Google AI API \u8C03\u7528\u5931\u8D25: ${response.status} - ${errorText}`);
       }
-      const data = await response.json();
+      const data = response.json;
       this.debugLog("Google AI \u5B8C\u6574\u54CD\u5E94:", data);
       if (data.error) {
         this.debugLog("Google AI \u8FD4\u56DE\u9519\u8BEF:", data.error);
@@ -7529,7 +7513,8 @@ GET ${path} HTTP/1.1`;
   async callOpenRouter(text) {
     try {
       const model = this.settings.openrouterModel || "openai/gpt-3.5-turbo";
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      const response = await (0, import_obsidian.requestUrl)({
+        url: "https://openrouter.ai/api/v1/chat/completions",
         method: "POST",
         headers: {
           "Authorization": `Bearer ${this.settings.openrouterApiKey}`,
@@ -7538,9 +7523,13 @@ GET ${path} HTTP/1.1`;
         body: JSON.stringify({
           model,
           messages: [{ role: "user", content: text }]
-        })
+        }),
+        throw: false
       });
-      const data = await response.json();
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`OpenRouter API \u9519\u8BEF: ${response.status}`);
+      }
+      const data = response.json;
       if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
         this.debugLog("OpenRouter \u54CD\u5E94\u683C\u5F0F\u9519\u8BEF:", data);
         throw new Error("OpenRouter \u8FD4\u56DE\u7684\u54CD\u5E94\u683C\u5F0F\u4E0D\u6B63\u786E");
@@ -7743,7 +7732,8 @@ GET ${path} HTTP/1.1`;
     }
     try {
       this.debugLog(`\u8C03\u7528\u81EA\u5B9A\u4E49 Google AI \u6A21\u578B: ${modelId}`);
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${this.settings.googleApiKey}`, {
+      const response = await (0, import_obsidian.requestUrl)({
+        url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(this.settings.googleApiKey)}`,
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -7754,14 +7744,15 @@ GET ${path} HTTP/1.1`;
               text
             }]
           }]
-        })
+        }),
+        throw: false
       });
-      if (!response.ok) {
-        const errorText = await response.text();
+      if (response.status < 200 || response.status >= 300) {
+        const errorText = response.text;
         this.debugLog(`\u81EA\u5B9A\u4E49Google AI API \u9519\u8BEF (${response.status}):`, errorText);
         throw new Error(`\u81EA\u5B9A\u4E49Google AI API \u8C03\u7528\u5931\u8D25: ${response.status} - ${errorText}`);
       }
-      const data = await response.json();
+      const data = response.json;
       this.debugLog("\u81EA\u5B9A\u4E49Google AI \u5B8C\u6574\u54CD\u5E94:", data);
       if (data.error) {
         this.debugLog("\u81EA\u5B9A\u4E49Google AI \u8FD4\u56DE\u9519\u8BEF:", data.error);
@@ -7792,7 +7783,8 @@ GET ${path} HTTP/1.1`;
       throw new Error("\u8BF7\u5148\u914D\u7F6E OpenRouter API Key");
     }
     try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      const response = await (0, import_obsidian.requestUrl)({
+        url: "https://openrouter.ai/api/v1/chat/completions",
         method: "POST",
         headers: {
           "Authorization": `Bearer ${this.settings.openrouterApiKey}`,
@@ -7806,12 +7798,13 @@ GET ${path} HTTP/1.1`;
               content: text
             }
           ]
-        })
+        }),
+        throw: false
       });
-      if (!response.ok) {
+      if (response.status < 200 || response.status >= 300) {
         throw new Error(`OpenRouter API \u9519\u8BEF: ${response.status}`);
       }
-      const data = await response.json();
+      const data = response.json;
       if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
         this.debugLog("\u81EA\u5B9A\u4E49OpenRouter \u54CD\u5E94\u683C\u5F0F\u9519\u8BEF:", data);
         throw new Error("\u81EA\u5B9A\u4E49OpenRouter \u8FD4\u56DE\u7684\u54CD\u5E94\u683C\u5F0F\u4E0D\u6B63\u786E");
@@ -7958,13 +7951,11 @@ GET ${apiPath} HTTP/1.1`;
    */
   async xunfeiOnlineTTS(text) {
     try {
-      console.log("[\u8BED\u97F3\u52A9\u624B] \u5F00\u59CB\u8BAF\u98DE\u5728\u7EBFTTS\uFF0C\u6587\u672C:", text.substring(0, 50) + "...");
       const host = "tts-api.xfyun.cn";
       const path = "/v2/tts";
       const apiKey = this.settings.xunfeiApiKey;
       const apiSecret = this.settings.xunfeiApiSecret;
       const appId = this.settings.xunfeiAppId;
-      console.log("[\u8BED\u97F3\u52A9\u624B] API\u914D\u7F6E - AppId:", appId, "ApiKey:", apiKey ? "\u5DF2\u8BBE\u7F6E" : "\u672A\u8BBE\u7F6E", "ApiSecret:", apiSecret ? "\u5DF2\u8BBE\u7F6E" : "\u672A\u8BBE\u7F6E");
       const date = new Date().toUTCString();
       const signatureOrigin = `host: ${host}
 date: ${date}
@@ -7980,7 +7971,6 @@ GET ${path} HTTP/1.1`;
         const audioChunks = [];
         let hasReceivedData = false;
         ws.onopen = () => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u8BAF\u98DETTS WebSocket \u8FDE\u63A5\u5DF2\u5EFA\u7ACB");
           this.debugLog("\u8BAF\u98DETTS WebSocket \u8FDE\u63A5\u5DF2\u5EFA\u7ACB");
           const params = {
             common: { app_id: appId },
@@ -8003,17 +7993,14 @@ GET ${path} HTTP/1.1`;
               text: btoa(unescape(encodeURIComponent(text)))
             }
           };
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u53D1\u9001TTS\u53C2\u6570:", JSON.stringify(params, null, 2));
           this.debugLog("\u53D1\u9001TTS\u53C2\u6570:", JSON.stringify(params, null, 2));
           ws.send(JSON.stringify(params));
         };
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            console.log("[\u8BED\u97F3\u52A9\u624B] \u6536\u5230TTS\u54CD\u5E94:", JSON.stringify(data, null, 2));
             this.debugLog("\u6536\u5230TTS\u54CD\u5E94:", JSON.stringify(data, null, 2));
             if (data.code !== 0) {
-              console.error("[\u8BED\u97F3\u52A9\u624B] TTS\u9519\u8BEF\u4EE3\u7801:", data.code, "\u9519\u8BEF\u4FE1\u606F:", data.message);
               this.debugLog("TTS\u9519\u8BEF\u4EE3\u7801:", data.code, "\u9519\u8BEF\u4FE1\u606F:", data.message);
               reject(new Error(`TTS\u9519\u8BEF: ${data.code} - ${data.message}`));
               return;
@@ -8021,39 +8008,29 @@ GET ${path} HTTP/1.1`;
             if (data.data && data.data.audio) {
               hasReceivedData = true;
               audioChunks.push(data.data.audio);
-              console.log("[\u8BED\u97F3\u52A9\u624B] \u6536\u5230\u97F3\u9891\u6570\u636E\u5757\uFF0C\u5927\u5C0F:", data.data.audio.length);
               this.debugLog("\u6536\u5230\u97F3\u9891\u6570\u636E\u5757\uFF0C\u5927\u5C0F:", data.data.audio.length);
             }
             if (data.data && data.data.status === 2) {
-              console.log("[\u8BED\u97F3\u52A9\u624B] TTS\u5408\u6210\u5B8C\u6210\uFF0C\u97F3\u9891\u5757\u6570\u91CF:", audioChunks.length);
               this.debugLog("TTS\u5408\u6210\u5B8C\u6210\uFF0C\u97F3\u9891\u5757\u6570\u91CF:", audioChunks.length);
               ws.close();
               if (audioChunks.length > 0) {
                 const combinedAudio = audioChunks.join("");
-                console.log("[\u8BED\u97F3\u52A9\u624B] \u62FC\u63A5\u540E\u7684\u97F3\u9891\u6570\u636E\u957F\u5EA6:", combinedAudio.length);
                 this.debugLog("\u62FC\u63A5\u540E\u7684\u97F3\u9891\u6570\u636E\u957F\u5EA6:", combinedAudio.length);
                 if (!combinedAudio || combinedAudio.length === 0) {
-                  console.error("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u6570\u636E\u4E3A\u7A7A");
                   reject(new Error("\u97F3\u9891\u6570\u636E\u4E3A\u7A7A"));
                   return;
                 }
                 if (!/^[A-Za-z0-9+/]*={0,2}$/.test(combinedAudio)) {
-                  console.error("[\u8BED\u97F3\u52A9\u624B] \u63A5\u6536\u5230\u7684\u97F3\u9891\u6570\u636E\u4E0D\u662F\u6709\u6548\u7684Base64\u683C\u5F0F");
-                  console.error("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u6570\u636E\u524D100\u5B57\u7B26:", combinedAudio.substring(0, 100));
                   reject(new Error("\u63A5\u6536\u5230\u7684\u97F3\u9891\u6570\u636E\u683C\u5F0F\u65E0\u6548"));
                   return;
                 }
-                console.log("[\u8BED\u97F3\u52A9\u624B] \u5F00\u59CB\u64AD\u653E\u97F3\u9891");
                 this.playAudioFromBase64(combinedAudio).then(() => {
-                  console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u64AD\u653E\u6210\u529F\u5B8C\u6210");
                   resolve();
                 }).catch((error) => {
-                  console.error("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u64AD\u653E\u5931\u8D25:", error);
                   this.debugLog("\u97F3\u9891\u64AD\u653E\u5931\u8D25:", error);
                   reject(error);
                 });
               } else {
-                console.log("[\u8BED\u97F3\u52A9\u624B] \u6CA1\u6709\u6536\u5230\u97F3\u9891\u6570\u636E");
                 this.debugLog("\u6CA1\u6709\u6536\u5230\u97F3\u9891\u6570\u636E");
                 resolve();
               }
@@ -8085,65 +8062,51 @@ GET ${path} HTTP/1.1`;
   async playAudioFromBase64(base64Audio) {
     return new Promise((resolve, reject) => {
       try {
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u5F00\u59CB\u64AD\u653E\u97F3\u9891\uFF0Cbase64\u957F\u5EA6:", base64Audio.length);
         this.debugLog("\u5F00\u59CB\u64AD\u653E\u97F3\u9891\uFF0Cbase64\u957F\u5EA6:", base64Audio.length);
         let cleanBase64 = base64Audio.replace(/[^A-Za-z0-9+/=]/g, "");
         while (cleanBase64.length % 4 !== 0) {
           cleanBase64 += "=";
         }
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u6E05\u7406\u540E\u7684base64\u957F\u5EA6:", cleanBase64.length);
         this.debugLog("\u6E05\u7406\u540E\u7684base64\u957F\u5EA6:", cleanBase64.length);
         if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
-          console.error("[\u8BED\u97F3\u52A9\u624B] \u65E0\u6548\u7684Base64\u683C\u5F0F");
-          console.error("[\u8BED\u97F3\u52A9\u624B] Base64\u524D100\u5B57\u7B26:", cleanBase64.substring(0, 100));
           throw new Error("\u65E0\u6548\u7684Base64\u683C\u5F0F");
         }
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u5F00\u59CBBase64\u89E3\u7801 (MP3\u683C\u5F0F)");
         this.debugLog("Base64\u524D50\u5B57\u7B26:", cleanBase64.substring(0, 50));
         let binaryString;
         try {
           binaryString = atob(cleanBase64);
         } catch (decodeError) {
-          console.error("[\u8BED\u97F3\u52A9\u624B] Base64\u89E3\u7801\u5931\u8D25:", decodeError);
-          console.error("[\u8BED\u97F3\u52A9\u624B] \u95EE\u9898Base64\u6570\u636E:", cleanBase64.substring(0, 200));
           throw new Error(`Base64\u89E3\u7801\u5931\u8D25: ${decodeError.message}`);
         }
         const mp3Data = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
           mp3Data[i] = binaryString.charCodeAt(i);
         }
-        console.log("[\u8BED\u97F3\u52A9\u624B] MP3\u97F3\u9891\u6570\u636E\u8F6C\u6362\u5B8C\u6210\uFF0C\u5B57\u8282\u957F\u5EA6:", mp3Data.length);
         this.debugLog("MP3\u97F3\u9891\u6570\u636E\u8F6C\u6362\u5B8C\u6210\uFF0C\u5B57\u8282\u957F\u5EA6:", mp3Data.length);
         const audioBlob = new Blob([mp3Data], { type: "audio/mpeg" });
         const audioUrl = URL.createObjectURL(audioBlob);
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891URL\u521B\u5EFA\u5B8C\u6210:", audioUrl);
         const audio = new Audio(audioUrl);
         this.currentAudio = audio;
         this.isPlaying = true;
         this.updatePlayPauseButton("\u23F8\uFE0F \u6682\u505C");
         audio.onloadeddata = () => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u6570\u636E\u52A0\u8F7D\u5B8C\u6210");
           this.debugLog("\u97F3\u9891\u6570\u636E\u52A0\u8F7D\u5B8C\u6210");
           this.updateStatusFloat("\u97F3\u9891\u6570\u636E\u52A0\u8F7D\u5B8C\u6210", "success");
         };
         audio.oncanplay = () => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u53EF\u4EE5\u64AD\u653E");
           this.debugLog("\u97F3\u9891\u53EF\u4EE5\u64AD\u653E");
           this.updateStatusFloat("\u97F3\u9891\u51C6\u5907\u5C31\u7EEA", "success");
         };
         audio.onplay = () => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u5F00\u59CB\u64AD\u653E");
           this.debugLog("\u97F3\u9891\u5F00\u59CB\u64AD\u653E");
           this.updateStatusFloat("\u5F00\u59CB\u64AD\u653E\u8BED\u97F3", "info");
           this.isPlaying = true;
         };
         audio.onpause = () => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u6682\u505C");
           this.updateStatusFloat("\u97F3\u9891\u5DF2\u6682\u505C", "info");
           this.isPlaying = false;
         };
         audio.onended = () => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u64AD\u653E\u7ED3\u675F");
           this.debugLog("\u97F3\u9891\u64AD\u653E\u7ED3\u675F");
           this.updateStatusFloat("\u8BED\u97F3\u64AD\u653E\u5B8C\u6210", "success");
           URL.revokeObjectURL(audioUrl);
@@ -8153,7 +8116,6 @@ GET ${path} HTTP/1.1`;
           resolve();
         };
         audio.onerror = (error) => {
-          console.error("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u64AD\u653E\u9519\u8BEF:", error);
           this.debugLog("\u97F3\u9891\u64AD\u653E\u9519\u8BEF:", error);
           this.updateStatusFloat("\u97F3\u9891\u64AD\u653E\u5931\u8D25", "error");
           URL.revokeObjectURL(audioUrl);
@@ -8162,13 +8124,9 @@ GET ${path} HTTP/1.1`;
           reject(new Error("\u97F3\u9891\u64AD\u653E\u5931\u8D25"));
         };
         audio.volume = 1;
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u97F3\u91CF\u8BBE\u7F6E\u4E3A:", audio.volume);
-        console.log("[\u8BED\u97F3\u52A9\u624B] \u5C1D\u8BD5\u64AD\u653E\u97F3\u9891");
         audio.play().then(() => {
-          console.log("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u64AD\u653E\u547D\u4EE4\u6267\u884C\u6210\u529F");
           this.debugLog("\u97F3\u9891\u64AD\u653E\u547D\u4EE4\u6267\u884C\u6210\u529F");
         }).catch((error) => {
-          console.error("[\u8BED\u97F3\u52A9\u624B] \u97F3\u9891\u64AD\u653E\u547D\u4EE4\u6267\u884C\u5931\u8D25:", error);
           this.debugLog("\u97F3\u9891\u64AD\u653E\u547D\u4EE4\u6267\u884C\u5931\u8D25:", error);
           reject(error);
         });
@@ -8186,7 +8144,6 @@ GET ${path} HTTP/1.1`;
           }
         }
       } catch (error) {
-        console.error("[\u8BED\u97F3\u52A9\u624B] \u64AD\u653E\u97F3\u9891\u9519\u8BEF:", error);
         this.debugLog("\u64AD\u653E\u97F3\u9891\u9519\u8BEF:", error);
         reject(error);
       }
@@ -8473,10 +8430,6 @@ GET ${path} HTTP/1.1`;
     if (this.wakeStream) {
       this.wakeStream.getTracks().forEach((track) => track.stop());
       this.wakeStream = null;
-    }
-    if (this.wakeProcess) {
-      this.wakeProcess.kill();
-      this.wakeProcess = null;
     }
     if (this.wakeWebSocket) {
       this.wakeWebSocket.close();
@@ -8779,7 +8732,7 @@ GET ${path} HTTP/1.1`;
         };
         ws.onerror = (error) => {
           this.updateStatusFloat("WebSocket\u8FDE\u63A5\u9519\u8BEF", "error");
-          console.error("[TTS\u8C03\u8BD5] WebSocket\u9519\u8BEF:", error);
+          this.debugLog("TTS WebSocket \u9519\u8BEF:", error);
         };
         ws.onclose = (event) => {
           if (!connectionSuccess) {
@@ -8796,7 +8749,6 @@ GET ${path} HTTP/1.1`;
         }, 1e4);
       }
     } catch (error) {
-      console.error("[TTS\u8C03\u8BD5] \u8C03\u8BD5\u5931\u8D25:", error);
       this.updateStatusFloat("TTS\u8C03\u8BD5\u5931\u8D25: " + (error instanceof Error ? error.message : String(error)), "error");
     }
   }
@@ -8807,44 +8759,22 @@ GET ${path} HTTP/1.1`;
     this.removeStatusFloat();
     this.statusFloat = document.createElement("div");
     this.statusFloat.className = "voice-assistant-status-float";
-    this.statusFloat.style.cssText = `
-			position: fixed;
-			bottom: 20px;
-			right: 20px;
-			width: 280px;
-			max-height: 200px;
-			background: var(--background-primary);
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 8px;
-			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-			z-index: 1000;
-			font-size: 12px;
-			overflow: hidden;
-			display: block;
-		`;
     const header = document.createElement("div");
-    header.style.cssText = `
-			padding: 8px 12px;
-			background: var(--background-secondary);
-			border-bottom: 1px solid var(--background-modifier-border);
-			font-weight: 600;
-			display: flex;
-			justify-content: space-between;
-			align-items: center;
-			cursor: move;
-			user-select: none;
-		`;
-    header.textContent = "\u8BED\u97F3\u52A9\u624B";
+    header.className = "voice-assistant-status-header";
+    const titleEl = document.createElement("span");
+    titleEl.className = "voice-assistant-status-title";
+    titleEl.textContent = "\u8BED\u97F3\u52A9\u624B";
+    header.appendChild(titleEl);
     let isDragging = false;
     let dragOffset = { x: 0, y: 0 };
-    header.addEventListener("mousedown", (e) => {
+    this.registerDomEvent(header, "mousedown", (e) => {
       isDragging = true;
       const rect = this.statusFloat.getBoundingClientRect();
       dragOffset.x = e.clientX - rect.left;
       dragOffset.y = e.clientY - rect.top;
       e.preventDefault();
     });
-    document.addEventListener("mousemove", (e) => {
+    this.registerDomEvent(document, "mousemove", (e) => {
       if (!isDragging || !this.statusFloat)
         return;
       const x = e.clientX - dragOffset.x;
@@ -8853,97 +8783,42 @@ GET ${path} HTTP/1.1`;
       const maxY = window.innerHeight - this.statusFloat.offsetHeight;
       const constrainedX = Math.max(0, Math.min(x, maxX));
       const constrainedY = Math.max(0, Math.min(y, maxY));
-      this.statusFloat.style.left = constrainedX + "px";
-      this.statusFloat.style.top = constrainedY + "px";
-      this.statusFloat.style.right = "auto";
-      this.statusFloat.style.bottom = "auto";
+      this.statusFloat.addClass("is-dragged");
+      this.statusFloat.setCssProps({
+        "--voice-assistant-left": `${constrainedX}px`,
+        "--voice-assistant-top": `${constrainedY}px`
+      });
     });
-    document.addEventListener("mouseup", () => {
+    this.registerDomEvent(document, "mouseup", () => {
       isDragging = false;
     });
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "\xD7";
-    closeBtn.style.cssText = `
-			background: none;
-			border: none;
-			font-size: 16px;
-			cursor: pointer;
-			padding: 0;
-			width: 20px;
-			height: 20px;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-		`;
+    closeBtn.className = "voice-assistant-close-button";
+    closeBtn.setAttribute("aria-label", "\u5173\u95ED\u8BED\u97F3\u52A9\u624B\u72B6\u6001");
     closeBtn.onclick = () => this.hideStatusFloat();
     header.appendChild(closeBtn);
     const content = document.createElement("div");
     content.className = "voice-assistant-content";
-    content.style.cssText = `
-			padding: 8px 12px;
-			max-height: 120px;
-			overflow-y: auto;
-		`;
     const controls = document.createElement("div");
     controls.className = "voice-assistant-controls";
-    controls.style.cssText = `
-			padding: 8px 12px;
-			border-top: 1px solid var(--background-modifier-border);
-			display: flex;
-			gap: 8px;
-			justify-content: center;
-		`;
     const playPauseBtn = document.createElement("button");
     playPauseBtn.textContent = "\u23F8\uFE0F \u6682\u505C";
-    playPauseBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 4px;
-			background: var(--background-primary);
-			cursor: pointer;
-			font-size: 11px;
-		`;
+    playPauseBtn.className = "voice-assistant-control-button";
     playPauseBtn.onclick = () => this.toggleTTSPlayback();
     const stopBtn = document.createElement("button");
     stopBtn.textContent = "\u23F9\uFE0F \u505C\u6B62";
-    stopBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 4px;
-			background: var(--background-primary);
-			cursor: pointer;
-			font-size: 11px;
-		`;
+    stopBtn.className = "voice-assistant-control-button";
     stopBtn.onclick = () => this.stopTTS();
     controls.appendChild(playPauseBtn);
     controls.appendChild(stopBtn);
     const endDialogBtn = document.createElement("button");
-    endDialogBtn.className = "end-dialog-btn";
+    endDialogBtn.className = "voice-assistant-control-button end-dialog-btn is-hidden";
     endDialogBtn.textContent = "\u{1F51A} \u7ED3\u675F\u5BF9\u8BDD";
-    endDialogBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--color-red);
-			border-radius: 4px;
-			background: var(--color-red);
-			color: white;
-			cursor: pointer;
-			font-size: 11px;
-			display: none;
-		`;
     endDialogBtn.onclick = () => this.endContinuousDialogWithSummary();
     const stopDictationBtn = document.createElement("button");
-    stopDictationBtn.className = "stop-dictation-btn";
+    stopDictationBtn.className = "voice-assistant-control-button stop-dictation-btn is-hidden";
     stopDictationBtn.textContent = "\u23F9\uFE0F \u505C\u6B62\u542C\u5199";
-    stopDictationBtn.style.cssText = `
-			padding: 4px 8px;
-			border: 1px solid var(--color-orange);
-			border-radius: 4px;
-			background: var(--color-orange);
-			color: white;
-			cursor: pointer;
-			font-size: 11px;
-			display: none;
-		`;
     stopDictationBtn.onclick = () => this.stopDictation();
     controls.appendChild(endDialogBtn);
     controls.appendChild(stopDictationBtn);
@@ -8966,7 +8841,7 @@ GET ${path} HTTP/1.1`;
    */
   showStatusFloat() {
     if (this.statusFloat) {
-      this.statusFloat.style.display = "block";
+      this.statusFloat.removeClass("is-hidden");
     }
   }
   /**
@@ -8974,7 +8849,7 @@ GET ${path} HTTP/1.1`;
    */
   hideStatusFloat() {
     if (this.statusFloat) {
-      this.statusFloat.style.display = "none";
+      this.statusFloat.addClass("is-hidden");
     }
   }
   /**
@@ -8988,21 +8863,14 @@ GET ${path} HTTP/1.1`;
       return;
     const timestamp = new Date().toLocaleTimeString();
     const messageDiv = document.createElement("div");
-    messageDiv.style.cssText = `
-			margin-bottom: 4px;
-			padding: 2px 0;
-			border-bottom: 1px solid var(--background-modifier-border-hover);
-		`;
-    const typeColors = {
-      info: "var(--text-muted)",
-      success: "var(--text-success)",
-      error: "var(--text-error)",
-      warning: "var(--text-warning)"
-    };
-    messageDiv.innerHTML = `
-			<span style="color: ${typeColors[type]}; font-weight: 500;">[${timestamp}]</span>
-			<span style="margin-left: 8px;">${message}</span>
-		`;
+    messageDiv.className = "voice-assistant-status-message";
+    const timestampEl = document.createElement("span");
+    timestampEl.className = `voice-assistant-status-timestamp is-${type}`;
+    timestampEl.textContent = `[${timestamp}]`;
+    const messageEl = document.createElement("span");
+    messageEl.className = "voice-assistant-status-message-text";
+    messageEl.textContent = message;
+    messageDiv.append(timestampEl, messageEl);
     content.appendChild(messageDiv);
     content.scrollTop = content.scrollHeight;
     this.showStatusFloat();
@@ -9040,15 +8908,14 @@ GET ${path} HTTP/1.1`;
    * 更新唤醒状态指示器
    */
   updateWakeStatus(isActive) {
-    const statusBarItem = this.addStatusBarItem();
-    statusBarItem.setText(isActive ? "\u{1F3A4} \u5524\u9192\u76D1\u542C\u4E2D" : "\u{1F507} \u5524\u9192\u5DF2\u505C\u6B62");
-    statusBarItem.title = isActive ? "\u8BED\u97F3\u5524\u9192\u6B63\u5728\u76D1\u542C\u4E2D" : "\u8BED\u97F3\u5524\u9192\u5DF2\u505C\u6B62";
-    statusBarItem.style.color = isActive ? "var(--text-success)" : "var(--text-muted)";
-    if (!isActive) {
-      setTimeout(() => {
-        statusBarItem.remove();
-      }, 3e3);
+    if (!this.wakeStatusBarItem) {
+      this.wakeStatusBarItem = this.addStatusBarItem();
+      this.wakeStatusBarItem.addClass("voice-assistant-status-bar");
     }
+    this.wakeStatusBarItem.setText(isActive ? "\u{1F3A4} \u5524\u9192\u76D1\u542C\u4E2D" : "\u{1F507} \u5524\u9192\u5DF2\u505C\u6B62");
+    this.wakeStatusBarItem.title = isActive ? "\u8BED\u97F3\u5524\u9192\u6B63\u5728\u76D1\u542C\u4E2D" : "\u8BED\u97F3\u5524\u9192\u5DF2\u505C\u6B62";
+    this.wakeStatusBarItem.toggleClass("is-active", isActive);
+    this.wakeStatusBarItem.toggleClass("is-inactive", !isActive);
     this.debugLog(`\u5524\u9192\u72B6\u6001\u66F4\u65B0: ${isActive ? "\u6FC0\u6D3B" : "\u505C\u6B62"}`);
   }
   /**
@@ -9169,12 +9036,12 @@ GET ${path} HTTP/1.1`;
     if (this.statusFloat) {
       const endDialogBtn = this.statusFloat.querySelector(".end-dialog-btn");
       if (endDialogBtn) {
-        endDialogBtn.style.display = "inline-block";
+        endDialogBtn.removeClass("is-hidden");
       }
-      const header = this.statusFloat.querySelector("div");
-      if (header) {
-        header.textContent = "\u8BED\u97F3\u52A9\u624B - \u6301\u7EED\u5BF9\u8BDD\u4E2D";
-        header.style.color = "var(--color-accent)";
+      const title = this.statusFloat.querySelector(".voice-assistant-status-title");
+      if (title) {
+        title.textContent = "\u8BED\u97F3\u52A9\u624B - \u6301\u7EED\u5BF9\u8BDD\u4E2D";
+        title.addClass("is-active");
       }
     }
   }
@@ -9185,12 +9052,12 @@ GET ${path} HTTP/1.1`;
     if (this.statusFloat) {
       const endDialogBtn = this.statusFloat.querySelector(".end-dialog-btn");
       if (endDialogBtn) {
-        endDialogBtn.style.display = "none";
+        endDialogBtn.addClass("is-hidden");
       }
-      const header = this.statusFloat.querySelector("div");
-      if (header) {
-        header.textContent = "\u8BED\u97F3\u52A9\u624B";
-        header.style.color = "";
+      const title = this.statusFloat.querySelector(".voice-assistant-status-title");
+      if (title) {
+        title.textContent = "\u8BED\u97F3\u52A9\u624B";
+        title.removeClass("is-active");
       }
     }
   }
@@ -9201,12 +9068,12 @@ GET ${path} HTTP/1.1`;
     if (this.statusFloat) {
       const stopDictationBtn = this.statusFloat.querySelector(".stop-dictation-btn");
       if (stopDictationBtn) {
-        stopDictationBtn.style.display = "inline-block";
+        stopDictationBtn.removeClass("is-hidden");
       }
-      const header = this.statusFloat.querySelector("div");
-      if (header) {
-        header.textContent = "\u8BED\u97F3\u52A9\u624B - \u542C\u5199\u4E2D";
-        header.style.color = "var(--color-accent)";
+      const title = this.statusFloat.querySelector(".voice-assistant-status-title");
+      if (title) {
+        title.textContent = "\u8BED\u97F3\u52A9\u624B - \u542C\u5199\u4E2D";
+        title.addClass("is-active");
       }
     }
   }
@@ -9217,12 +9084,12 @@ GET ${path} HTTP/1.1`;
     if (this.statusFloat) {
       const stopDictationBtn = this.statusFloat.querySelector(".stop-dictation-btn");
       if (stopDictationBtn) {
-        stopDictationBtn.style.display = "none";
+        stopDictationBtn.addClass("is-hidden");
       }
-      const header = this.statusFloat.querySelector("div");
-      if (header) {
-        header.textContent = "\u8BED\u97F3\u52A9\u624B";
-        header.style.color = "";
+      const title = this.statusFloat.querySelector(".voice-assistant-status-title");
+      if (title) {
+        title.textContent = "\u8BED\u97F3\u52A9\u624B";
+        title.removeClass("is-active");
       }
     }
   }
@@ -9674,33 +9541,45 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "\u8BED\u97F3\u52A9\u624B\u8BBE\u7F6E" });
-    containerEl.createEl("h3", { text: "LLM \u914D\u7F6E" });
+    containerEl.addClass("voice-assistant-settings");
+    new import_obsidian.Setting(containerEl).setName("LLM").setHeading();
     new import_obsidian.Setting(containerEl).setName("LLM \u63D0\u4F9B\u5546").setDesc("\u9009\u62E9\u8981\u4F7F\u7528\u7684\u5927\u8BED\u8A00\u6A21\u578B\u63D0\u4F9B\u5546").addDropdown((dropdown) => dropdown.addOption("google", "Google AI Studio").addOption("openrouter", "OpenRouter").addOption("xunfei", "\u8BAF\u98DE\u661F\u706B").addOption("custom", "\u81EA\u5B9A\u4E49\u6A21\u578B").setValue(this.plugin.settings.llmProvider).onChange(async (value) => {
       this.plugin.settings.llmProvider = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Google API Key").setDesc("Google AI Studio API \u5BC6\u94A5").addText((text) => text.setPlaceholder("\u8F93\u5165 Google API Key").setValue(this.plugin.settings.googleApiKey).onChange(async (value) => {
-      this.plugin.settings.googleApiKey = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("OpenRouter API Key").setDesc("OpenRouter API \u5BC6\u94A5").addText((text) => text.setPlaceholder("\u8F93\u5165 OpenRouter API Key").setValue(this.plugin.settings.openrouterApiKey).onChange(async (value) => {
-      this.plugin.settings.openrouterApiKey = value;
-      await this.plugin.saveSettings();
-    }));
+    new import_obsidian.Setting(containerEl).setName("Google API Key").setDesc("Google AI Studio API \u5BC6\u94A5").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("\u8F93\u5165 Google API Key").setValue(this.plugin.settings.googleApiKey).onChange(async (value) => {
+        this.plugin.settings.googleApiKey = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("OpenRouter API Key").setDesc("OpenRouter API \u5BC6\u94A5").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("\u8F93\u5165 OpenRouter API Key").setValue(this.plugin.settings.openrouterApiKey).onChange(async (value) => {
+        this.plugin.settings.openrouterApiKey = value;
+        await this.plugin.saveSettings();
+      });
+    });
     new import_obsidian.Setting(containerEl).setName("\u8BAF\u98DE App ID").setDesc("\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0\u5E94\u7528 ID").addText((text) => text.setPlaceholder("\u8F93\u5165\u8BAF\u98DE App ID").setValue(this.plugin.settings.xunfeiAppId).onChange(async (value) => {
       this.plugin.settings.xunfeiAppId = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("\u8BAF\u98DE API Key").setDesc("\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0 API Key").addText((text) => text.setPlaceholder("\u8F93\u5165\u8BAF\u98DE API Key").setValue(this.plugin.settings.xunfeiApiKey).onChange(async (value) => {
-      this.plugin.settings.xunfeiApiKey = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("\u8BAF\u98DE API Secret").setDesc("\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0 API Secret").addText((text) => text.setPlaceholder("\u8F93\u5165\u8BAF\u98DE API Secret").setValue(this.plugin.settings.xunfeiApiSecret).onChange(async (value) => {
-      this.plugin.settings.xunfeiApiSecret = value;
-      await this.plugin.saveSettings();
-    }));
-    containerEl.createEl("h3", { text: "\u6A21\u578B\u9009\u62E9" });
+    new import_obsidian.Setting(containerEl).setName("\u8BAF\u98DE API Key").setDesc("\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0 API Key").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("\u8F93\u5165\u8BAF\u98DE API Key").setValue(this.plugin.settings.xunfeiApiKey).onChange(async (value) => {
+        this.plugin.settings.xunfeiApiKey = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u8BAF\u98DE API Secret").setDesc("\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0 API Secret").addText((text) => {
+      text.inputEl.type = "password";
+      text.setPlaceholder("\u8F93\u5165\u8BAF\u98DE API Secret").setValue(this.plugin.settings.xunfeiApiSecret).onChange(async (value) => {
+        this.plugin.settings.xunfeiApiSecret = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("\u6A21\u578B").setHeading();
     new import_obsidian.Setting(containerEl).setName("Google \u6A21\u578B").setDesc("\u9009\u62E9\u8981\u4F7F\u7528\u7684 Google AI Studio \u6A21\u578B").addDropdown((dropdown) => dropdown.addOption("gemini-2.5-flash", "Gemini 2.5 Flash (\u63A8\u8350)").addOption("gemini-2.5-pro", "Gemini 2.5 Pro").addOption("gemini-1.5-pro", "Gemini 1.5 Pro").addOption("gemini-1.5-flash", "Gemini 1.5 Flash").addOption("gemini-pro", "Gemini Pro").addOption("gemini-1.0-pro", "Gemini 1.0 Pro").setValue(this.plugin.settings.googleModel).onChange(async (value) => {
       this.plugin.settings.googleModel = value;
       await this.plugin.saveSettings();
@@ -9713,12 +9592,11 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.xunfeiModel = value;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl("h3", { text: "\u81EA\u5B9A\u4E49\u6A21\u578B" });
+    new import_obsidian.Setting(containerEl).setName("\u81EA\u5B9A\u4E49\u6A21\u578B").setHeading();
     const customModelsDesc = containerEl.createEl("p", {
       text: "\u60A8\u53EF\u4EE5\u6DFB\u52A0\u81EA\u5B9A\u4E49\u6A21\u578B\u914D\u7F6E\uFF0C\u652F\u6301Google AI Studio\u3001OpenRouter\u548C\u8BAF\u98DE\u661F\u706B\u63D0\u4F9B\u5546"
     });
-    customModelsDesc.style.fontSize = "0.9em";
-    customModelsDesc.style.color = "var(--text-muted)";
+    customModelsDesc.addClass("voice-assistant-muted-description");
     const customModelSetting = new import_obsidian.Setting(containerEl).setName("\u9009\u62E9\u81EA\u5B9A\u4E49\u6A21\u578B").setDesc("\u4ECE\u5DF2\u914D\u7F6E\u7684\u81EA\u5B9A\u4E49\u6A21\u578B\u4E2D\u9009\u62E9\u4E00\u4E2A");
     const updateCustomModelDropdown = () => {
       customModelSetting.clear();
@@ -9736,7 +9614,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
     };
     updateCustomModelDropdown();
     const addCustomModelContainer = containerEl.createDiv();
-    addCustomModelContainer.createEl("h4", { text: "\u6DFB\u52A0\u65B0\u7684\u81EA\u5B9A\u4E49\u6A21\u578B" });
+    new import_obsidian.Setting(addCustomModelContainer).setName("\u6DFB\u52A0\u65B0\u7684\u81EA\u5B9A\u4E49\u6A21\u578B").setHeading();
     let newModelName = "";
     let newModelProvider = "google";
     let newModelId = "";
@@ -9774,37 +9652,27 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       new import_obsidian.Notice("\u81EA\u5B9A\u4E49\u6A21\u578B\u6DFB\u52A0\u6210\u529F");
     }));
     const existingModelsContainer = containerEl.createDiv();
-    existingModelsContainer.createEl("h4", { text: "\u73B0\u6709\u81EA\u5B9A\u4E49\u6A21\u578B" });
+    new import_obsidian.Setting(existingModelsContainer).setName("\u73B0\u6709\u81EA\u5B9A\u4E49\u6A21\u578B").setHeading();
     const updateExistingModelsList = () => {
       existingModelsContainer.empty();
-      existingModelsContainer.createEl("h4", { text: "\u73B0\u6709\u81EA\u5B9A\u4E49\u6A21\u578B" });
+      new import_obsidian.Setting(existingModelsContainer).setName("\u73B0\u6709\u81EA\u5B9A\u4E49\u6A21\u578B").setHeading();
       if (this.plugin.settings.customModels.length === 0) {
         existingModelsContainer.createEl("p", {
           text: "\u6682\u65E0\u81EA\u5B9A\u4E49\u6A21\u578B",
-          attr: { style: "color: var(--text-muted); font-style: italic;" }
+          cls: "voice-assistant-empty-state"
         });
         return;
       }
       this.plugin.settings.customModels.forEach((model, index) => {
-        const modelContainer = existingModelsContainer.createDiv();
-        modelContainer.style.border = "1px solid var(--background-modifier-border)";
-        modelContainer.style.borderRadius = "4px";
-        modelContainer.style.padding = "10px";
-        modelContainer.style.marginBottom = "10px";
-        const modelInfo = modelContainer.createDiv();
-        modelInfo.innerHTML = `
-					<strong>${model.name}</strong><br>
-					<span style="color: var(--text-muted);">\u63D0\u4F9B\u5546: ${model.provider}</span><br>
-					<span style="color: var(--text-muted);">\u6A21\u578BID: ${model.modelId}</span>
-				`;
-        const deleteButton = modelContainer.createEl("button", { text: "\u5220\u9664" });
-        deleteButton.style.marginTop = "5px";
-        deleteButton.style.backgroundColor = "var(--interactive-accent)";
-        deleteButton.style.color = "white";
-        deleteButton.style.border = "none";
-        deleteButton.style.borderRadius = "3px";
-        deleteButton.style.padding = "5px 10px";
-        deleteButton.style.cursor = "pointer";
+        const modelContainer = existingModelsContainer.createDiv("voice-assistant-model-card");
+        const modelInfo = modelContainer.createDiv("voice-assistant-model-info");
+        modelInfo.createEl("strong", { text: model.name });
+        modelInfo.createDiv({ text: `\u63D0\u4F9B\u5546: ${model.provider}`, cls: "voice-assistant-model-meta" });
+        modelInfo.createDiv({ text: `\u6A21\u578B ID: ${model.modelId}`, cls: "voice-assistant-model-meta" });
+        const deleteButton = modelContainer.createEl("button", {
+          text: "\u5220\u9664",
+          cls: "voice-assistant-delete-button"
+        });
         deleteButton.addEventListener("click", async () => {
           this.plugin.settings.customModels.splice(index, 1);
           if (this.plugin.settings.selectedCustomModel === model.name) {
@@ -9818,7 +9686,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       });
     };
     updateExistingModelsList();
-    containerEl.createEl("h3", { text: "\u8BED\u97F3\u5524\u9192\u914D\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u8BED\u97F3\u5524\u9192").setHeading();
     new import_obsidian.Setting(containerEl).setName("\u5524\u9192\u6A21\u5F0F").setDesc("\u9009\u62E9\u8BED\u97F3\u5524\u9192\u7684\u5DE5\u4F5C\u6A21\u5F0F").addDropdown((dropdown) => dropdown.addOption("disabled", "\u7981\u7528").addOption("online", "\u8BAF\u98DE\u5728\u7EBF\u5524\u9192").setValue(this.plugin.settings.wakeMode).onChange(async (value) => {
       this.plugin.settings.wakeMode = value;
       await this.plugin.saveSettings();
@@ -9839,12 +9707,12 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       wakeIntervalValueEl.textContent = `${value / 1e3}\u79D2`;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl("h3", { text: "\u8BED\u97F3\u8BC6\u522B\u914D\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u8BED\u97F3\u8BC6\u522B").setHeading();
     new import_obsidian.Setting(containerEl).setName("ASR \u63D0\u4F9B\u5546").setDesc("\u9009\u62E9\u8BED\u97F3\u8BC6\u522B\u670D\u52A1\u63D0\u4F9B\u5546").addDropdown((dropdown) => dropdown.addOption("xunfei", "\u8BAF\u98DE\u8BED\u97F3\u8BC6\u522B").setValue(this.plugin.settings.asrProvider).onChange(async (value) => {
       this.plugin.settings.asrProvider = value;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl("h3", { text: "\u8BED\u97F3\u542C\u5199\u914D\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u8BED\u97F3\u542C\u5199").setHeading();
     const dictationTimeoutSetting = new import_obsidian.Setting(containerEl).setName("\u6301\u7EED\u542C\u5199\u9759\u9ED8\u8D85\u65F6").setDesc("\u6301\u7EED\u542C\u5199\u6A21\u5F0F\u4E0B\uFF0C\u9759\u9ED8\u591A\u5C11\u79D2\u540E\u81EA\u52A8\u7ED3\u675F\u542C\u5199");
     const dictationTimeoutValueEl = dictationTimeoutSetting.controlEl.createSpan({
       text: `${this.plugin.settings.dictationSilenceTimeout}\u79D2`,
@@ -9865,7 +9733,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       dictationIntervalValueEl.textContent = `${value}\u79D2`;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl("h3", { text: "\u8BED\u97F3\u5408\u6210\u914D\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u8BED\u97F3\u5408\u6210").setHeading();
     new import_obsidian.Setting(containerEl).setName("TTS \u63D0\u4F9B\u5546").setDesc("\u9009\u62E9\u8BED\u97F3\u5408\u6210\u670D\u52A1\u63D0\u4F9B\u5546").addDropdown((dropdown) => dropdown.addOption("xunfei", "\u8BAF\u98DE\u8BED\u97F3\u5408\u6210").setValue(this.plugin.settings.ttsProvider).onChange(async (value) => {
       this.plugin.settings.ttsProvider = value;
       await this.plugin.saveSettings();
@@ -9878,7 +9746,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
     const voiceSetting = new import_obsidian.Setting(containerEl).setName("\u6717\u8BFB\u4EBA\u58F0\u97F3").setDesc("\u9009\u62E9\u8BED\u97F3\u5408\u6210\u7684\u6717\u8BFB\u4EBA\u58F0\u97F3");
     const updateVoiceOptions = () => {
       voiceSetting.addDropdown((dropdown) => {
-        dropdown.selectEl.innerHTML = "";
+        dropdown.selectEl.empty();
         if (this.plugin.settings.ttsProvider === "xunfei") {
           dropdown.addOption("xiaoyan", "\u5C0F\u71D5 (\u5973\u58F0) - \u7ECF\u5178").addOption("aisjiuxu", "\u7231\u601D\u4E5D\u65ED (\u7537\u58F0) - \u7ECF\u5178").addOption("aisxping", "\u7231\u601D\u5C0F\u840D (\u5973\u58F0) - \u7ECF\u5178").addOption("aisjinger", "\u7231\u601D\u91D1\u513F (\u5973\u58F0) - \u7ECF\u5178").addOption("aisbabyxu", "\u7231\u601D\u5B9D\u65ED (\u7537\u7AE5\u58F0) - \u7ECF\u5178").addOption("x2_xiaolu", "\u8BAF\u98DE\u5C0F\u9732 (\u4EB2\u5207\u5973\u58F0)").addOption("x2_yifei", "\u8BAF\u98DE\u4E00\u83F2 (\u751C\u7F8E\u5973\u58F0)").addOption("x2_qige", "\u8BAF\u98DE\u4E03\u54E5 (\u78C1\u6027\u7537\u58F0)").addOption("x2_chaoge", "\u8BAF\u98DE\u8D85\u54E5 (\u78C1\u6027\u7537\u58F0)").addOption("x2_mengxiaoxin", "\u8BAF\u98DE\u840C\u5C0F\u65B0 (\u53EF\u7231\u7537\u7AE5)").addOption("x2_xiaopeng", "\u8BAF\u98DE\u5C0F\u9E4F (\u6210\u719F\u7537\u58F0)").addOption("x2_lingjiejie", "\u8BAF\u98DE\u73B2\u59D0\u59D0 (\u6E29\u67D4\u5973\u58F0)").addOption("x2_songbaobao", "\u8BAF\u98DE\u5B8B\u5B9D\u5B9D (\u641E\u602A\u7537\u58F0)").addOption("x2_xiaojun", "\u8BAF\u98DE\u5C0F\u4FCA (\u70ED\u60C5\u7537\u58F0)").addOption("x2_xiaonan", "\u8BAF\u98DE\u5C0F\u5357 (\u77E5\u6027\u5973\u58F0)").addOption("x2_chengcheng", "\u8BAF\u98DE\u7A0B\u7A0B (\u4EB2\u5207\u5973\u58F0)").addOption("x2_xiaoxue", "\u8BAF\u98DE\u5C0F\u859B (\u751C\u7F8E\u5973\u58F0)").addOption("x2_yaoyao", "\u8BAF\u98DE\u7476\u7476 (\u751C\u7F8E\u5973\u58F0)");
         }
@@ -9937,7 +9805,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.audioSavePath = value;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl("h3", { text: "\u5F55\u97F3\u914D\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u5F55\u97F3").setHeading();
     new import_obsidian.Setting(containerEl).setName("\u91C7\u6837\u7387").setDesc("\u97F3\u9891\u91C7\u6837\u7387 (Hz)").addDropdown((dropdown) => dropdown.addOption("8000", "8000 Hz").addOption("16000", "16000 Hz").addOption("44100", "44100 Hz").setValue(this.plugin.settings.sampleRate.toString()).onChange(async (value) => {
       this.plugin.settings.sampleRate = parseInt(value);
       await this.plugin.saveSettings();
@@ -9959,7 +9827,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
         new import_obsidian.Notice(`\u5F55\u97F3\u6D4B\u8BD5\u5931\u8D25\uFF1A${errorMessage}`);
       }
     }));
-    containerEl.createEl("h3", { text: "\u6301\u7EED\u5BF9\u8BDD\u914D\u7F6E" });
+    new import_obsidian.Setting(containerEl).setName("\u6301\u7EED\u5BF9\u8BDD").setHeading();
     const dialogDurationSetting = new import_obsidian.Setting(containerEl).setName("\u6301\u7EED\u5BF9\u8BDD\u65F6\u957F").setDesc("\u5524\u9192\u540E\u4FDD\u6301\u5BF9\u8BDD\u72B6\u6001\u7684\u65F6\u957F\uFF08\u79D2\uFF09");
     const dialogDurationValueEl = dialogDurationSetting.controlEl.createSpan({
       text: `${this.plugin.settings.continuousDialogDuration}\u79D2`,
@@ -10002,17 +9870,19 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       voiceSensitivityValueEl.textContent = `${value}ms`;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl("h3", { text: "\u81EA\u5B9A\u4E49\u63D0\u793A\u8BCD\u914D\u7F6E" });
-    const promptsDesc = containerEl.createDiv();
-    promptsDesc.innerHTML = `
-			<p>\u914D\u7F6E\u81EA\u5B9A\u4E49\u63D0\u793A\u8BCD\uFF0C\u5F53\u7528\u6237\u8F93\u5165\u5305\u542B\u89E6\u53D1\u8BCD\u65F6\uFF0C\u4F1A\u81EA\u52A8\u6DFB\u52A0\u5BF9\u5E94\u7684\u63D0\u793A\u8BCD\u53D1\u9001\u7ED9\u5927\u6A21\u578B\u3002</p>
-			<p><strong>\u793A\u4F8B\uFF1A</strong>\u89E6\u53D1\u8BCD"\u63D0\u9192"\uFF0C\u63D0\u793A\u8BCD"\u8BF7\u751F\u6210\u4E00\u4E2AMarkdown\u683C\u5F0F\u7684\u4EFB\u52A1\u63D0\u9192"</p>
-		`;
+    new import_obsidian.Setting(containerEl).setName("\u81EA\u5B9A\u4E49\u63D0\u793A\u8BCD").setHeading();
+    const promptsDesc = containerEl.createDiv("voice-assistant-description");
+    promptsDesc.createEl("p", {
+      text: "\u914D\u7F6E\u81EA\u5B9A\u4E49\u63D0\u793A\u8BCD\u3002\u5F53\u8F93\u5165\u5305\u542B\u89E6\u53D1\u8BCD\u65F6\uFF0C\u63D2\u4EF6\u4F1A\u628A\u5BF9\u5E94\u63D0\u793A\u8BCD\u4E00\u5E76\u53D1\u9001\u7ED9\u6240\u9009\u6A21\u578B\u3002"
+    });
+    const promptExample = promptsDesc.createEl("p");
+    promptExample.createEl("strong", { text: "\u793A\u4F8B\uFF1A" });
+    promptExample.appendText("\u89E6\u53D1\u8BCD\u201C\u63D0\u9192\u201D\uFF0C\u63D0\u793A\u8BCD\u201C\u8BF7\u751F\u6210\u4E00\u4E2A Markdown \u683C\u5F0F\u7684\u4EFB\u52A1\u63D0\u9192\u201D\u3002");
     this.displayCustomPrompts(containerEl);
     new import_obsidian.Setting(containerEl).setName("\u6DFB\u52A0\u65B0\u63D0\u793A\u8BCD").setDesc("\u70B9\u51FB\u6DFB\u52A0\u4E00\u4E2A\u65B0\u7684\u81EA\u5B9A\u4E49\u63D0\u793A\u8BCD").addButton((button) => button.setButtonText("\u6DFB\u52A0\u63D0\u793A\u8BCD").setCta().onClick(() => {
       this.addNewCustomPrompt(containerEl);
     }));
-    containerEl.createEl("h3", { text: "\u6D4B\u8BD5\u529F\u80FD" });
+    new import_obsidian.Setting(containerEl).setName("\u6D4B\u8BD5").setHeading();
     new import_obsidian.Setting(containerEl).setName("\u6D4B\u8BD5\u8BAF\u98DE\u5728\u7EBF ASR").setDesc("\u6D4B\u8BD5\u8BED\u97F3\u8BC6\u522B\u529F\u80FD\u662F\u5426\u6B63\u5E38\u5DE5\u4F5C").addButton((button) => button.setButtonText("\u6D4B\u8BD5 ASR").onClick(() => {
       this.plugin.testOnlineASR();
     }));
@@ -10031,22 +9901,21 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("\u8C03\u8BD5\u6587\u672C\u5185\u5BB9").setDesc("\u8C03\u8BD5\u5F53\u524D\u6587\u672C\u5185\u5BB9\u548C\u5904\u7406\u72B6\u6001").addButton((button) => button.setButtonText("\u8C03\u8BD5\u6587\u672C").onClick(() => {
       this.plugin.debugTextContent();
     }));
-    containerEl.createEl("h3", { text: "\u8C03\u8BD5\u914D\u7F6E" });
-    new import_obsidian.Setting(containerEl).setName("\u542F\u7528\u8C03\u8BD5\u65E5\u5FD7").setDesc("\u5728\u63A7\u5236\u53F0\u8F93\u51FA\u8BE6\u7EC6\u7684\u8C03\u8BD5\u4FE1\u606F").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableDebugLog).onChange(async (value) => {
-      this.plugin.settings.enableDebugLog = value;
-      await this.plugin.saveSettings();
-    }));
-    containerEl.createEl("h3", { text: "\u5E2E\u52A9\u4FE1\u606F" });
-    const helpDiv = containerEl.createDiv();
-    helpDiv.innerHTML = `
-			<p><strong>\u4F7F\u7528\u8BF4\u660E\uFF1A</strong></p>
-			<p>1. \u8BBF\u95EE <a href="https://www.xfyun.cn/doc/" target="_blank">\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0</a> \u83B7\u53D6API\u5BC6\u94A5</p>
-			<p>2. \u5728\u4E0A\u8FF0\u8BBE\u7F6E\u4E2D\u586B\u5199\u6B63\u786E\u7684API\u914D\u7F6E\u4FE1\u606F</p>
-			<br>
-			<p><strong>\u6CE8\u610F\u4E8B\u9879\uFF1A</strong></p>
-			<p>\u2022 \u97F3\u9891\u6570\u636E\u4F1A\u53D1\u9001\u5230\u8BAF\u98DE\u670D\u52A1\u5668\u8FDB\u884C\u5904\u7406</p>
-			<p>\u2022 \u8BF7\u59A5\u5584\u4FDD\u7BA1\u60A8\u7684 API \u5BC6\u94A5\uFF0C\u907F\u514D\u6CC4\u9732</p>
-		`;
+    new import_obsidian.Setting(containerEl).setName("\u5E2E\u52A9").setHeading();
+    const helpDiv = containerEl.createDiv("voice-assistant-help");
+    helpDiv.createEl("strong", { text: "\u4F7F\u7528\u8BF4\u660E" });
+    const providerHelp = helpDiv.createEl("p");
+    providerHelp.appendText("1. \u8BBF\u95EE ");
+    providerHelp.createEl("a", {
+      text: "\u8BAF\u98DE\u5F00\u653E\u5E73\u53F0",
+      href: "https://www.xfyun.cn/doc/",
+      attr: { target: "_blank", rel: "noopener noreferrer" }
+    });
+    providerHelp.appendText(" \u83B7\u53D6 API \u51ED\u636E\u3002");
+    helpDiv.createEl("p", { text: "2. \u5728\u4E0A\u65B9\u8BBE\u7F6E\u4E2D\u586B\u5199\u5BF9\u5E94\u7684 API \u914D\u7F6E\u4FE1\u606F\u3002" });
+    helpDiv.createEl("strong", { text: "\u6CE8\u610F\u4E8B\u9879" });
+    helpDiv.createEl("p", { text: "\u2022 \u9EA6\u514B\u98CE\u97F3\u9891\u4F1A\u53D1\u9001\u5230\u8BAF\u98DE\u670D\u52A1\u5668\u8FDB\u884C\u5904\u7406\u3002" });
+    helpDiv.createEl("p", { text: "\u2022 API \u51ED\u636E\u4F1A\u4FDD\u5B58\u5728\u63D2\u4EF6\u6570\u636E\u6587\u4EF6\u4E2D\uFF0C\u8BF7\u59A5\u5584\u4FDD\u7BA1\u3002" });
   }
   /**
    * 显示唤醒词管理界面
@@ -10054,7 +9923,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
   displayWakeWords(container) {
     container.empty();
     const wakeWordsDiv = container.createDiv();
-    wakeWordsDiv.createEl("h4", { text: "\u5524\u9192\u8BCD\u7BA1\u7406" });
+    new import_obsidian.Setting(wakeWordsDiv).setName("\u5524\u9192\u8BCD").setHeading();
     this.plugin.settings.wakeWords.forEach((word, index) => {
       const wordDiv = wakeWordsDiv.createDiv({ cls: "wake-word-item" });
       wordDiv.createSpan({ text: word });
@@ -10065,7 +9934,7 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
         this.displayWakeWords(container);
       };
     });
-    const addDiv = wakeWordsDiv.createDiv();
+    const addDiv = wakeWordsDiv.createDiv("wake-word-add");
     const input = addDiv.createEl("input", { type: "text", placeholder: "\u8F93\u5165\u65B0\u5524\u9192\u8BCD" });
     const addBtn = addDiv.createEl("button", { text: "\u6DFB\u52A0" });
     addBtn.onclick = async () => {
@@ -10091,48 +9960,34 @@ var VoiceAssistantSettingTab = class extends import_obsidian.PluginSettingTab {
       return;
     }
     this.plugin.settings.customPrompts.forEach((prompt, index) => {
-      const promptDiv = promptsContainer.createDiv("custom-prompt-item");
-      promptDiv.style.cssText = `
-				border: 1px solid var(--background-modifier-border);
-				border-radius: 6px;
-				padding: 12px;
-				margin: 8px 0;
-				background: var(--background-secondary);
-			`;
-      const headerDiv = promptDiv.createDiv();
-      headerDiv.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;";
-      const titleSpan = headerDiv.createEl("span");
-      titleSpan.textContent = prompt.name;
-      titleSpan.style.fontWeight = "500";
+      const promptDiv = promptsContainer.createDiv("voice-assistant-prompt-card");
+      const headerDiv = promptDiv.createDiv("voice-assistant-prompt-header");
+      headerDiv.createEl("span", { text: prompt.name, cls: "voice-assistant-prompt-title" });
       const enableToggle = headerDiv.createEl("input", { type: "checkbox" });
       enableToggle.checked = prompt.enabled;
       enableToggle.onchange = async () => {
         this.plugin.settings.customPrompts[index].enabled = enableToggle.checked;
         await this.plugin.saveSettings();
       };
-      const triggerDiv = promptDiv.createDiv();
-      triggerDiv.innerHTML = `<strong>\u89E6\u53D1\u8BCD\uFF1A</strong>${prompt.trigger}`;
-      triggerDiv.style.marginBottom = "8px";
-      const promptContentDiv = promptDiv.createDiv();
-      promptContentDiv.innerHTML = `<strong>\u63D0\u793A\u8BCD\uFF1A</strong>`;
-      const promptText = promptContentDiv.createEl("div");
-      promptText.textContent = prompt.prompt;
-      promptText.style.cssText = `
-				background: var(--background-primary);
-				padding: 8px;
-				border-radius: 4px;
-				margin-top: 4px;
-				font-family: var(--font-monospace);
-				font-size: 0.9em;
-				white-space: pre-wrap;
-			`;
-      const actionsDiv = promptDiv.createDiv();
-      actionsDiv.style.cssText = "display: flex; gap: 8px; margin-top: 12px;";
-      const editBtn = actionsDiv.createEl("button", { text: "\u7F16\u8F91" });
-      editBtn.style.cssText = "padding: 4px 8px; font-size: 0.8em;";
+      const triggerDiv = promptDiv.createDiv("voice-assistant-prompt-trigger");
+      triggerDiv.createEl("strong", { text: "\u89E6\u53D1\u8BCD\uFF1A" });
+      triggerDiv.appendText(prompt.trigger);
+      const promptContentDiv = promptDiv.createDiv("voice-assistant-prompt-content");
+      promptContentDiv.createEl("strong", { text: "\u63D0\u793A\u8BCD\uFF1A" });
+      promptContentDiv.createEl("div", {
+        text: prompt.prompt,
+        cls: "voice-assistant-prompt-text"
+      });
+      const actionsDiv = promptDiv.createDiv("voice-assistant-prompt-actions");
+      const editBtn = actionsDiv.createEl("button", {
+        text: "\u7F16\u8F91",
+        cls: "voice-assistant-prompt-action"
+      });
       editBtn.onclick = () => this.editCustomPrompt(containerEl, index);
-      const deleteBtn = actionsDiv.createEl("button", { text: "\u5220\u9664" });
-      deleteBtn.style.cssText = "padding: 4px 8px; font-size: 0.8em; background: var(--color-red); color: white;";
+      const deleteBtn = actionsDiv.createEl("button", {
+        text: "\u5220\u9664",
+        cls: ["voice-assistant-prompt-action", "mod-warning"]
+      });
       deleteBtn.onclick = async () => {
         this.plugin.settings.customPrompts.splice(index, 1);
         await this.plugin.saveSettings();

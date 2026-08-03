@@ -1,371 +1,233 @@
-/* 语音助手插件样式 */
-
-/* 设置面板样式 */
+/* Yuhanbo Voice Assistant：所有设置面板样式均限定在插件容器内。 */
 .voice-assistant-settings {
-    padding: 20px;
+	padding: var(--size-4-4);
 }
 
-.voice-assistant-settings h2 {
-    color: var(--text-accent);
-    border-bottom: 2px solid var(--background-modifier-border);
-    padding-bottom: 10px;
-    margin-bottom: 20px;
+.voice-assistant-settings .setting-item {
+	margin-bottom: var(--size-4-3);
 }
 
-.voice-assistant-settings h3 {
-    color: var(--text-normal);
-    margin-top: 30px;
-    margin-bottom: 15px;
-    font-size: 1.2em;
+.voice-assistant-settings .setting-item:last-child {
+	margin-bottom: 0;
 }
 
-/* 唤醒词管理样式 */
-.wake-word-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 12px;
-    margin: 5px 0;
-    background: var(--background-secondary);
-    border-radius: 6px;
-    border: 1px solid var(--background-modifier-border);
+.voice-assistant-settings input[type="text"],
+.voice-assistant-settings input[type="password"] {
+	width: 100%;
+	max-width: 24rem;
 }
 
-.wake-word-item span {
-    flex-grow: 1;
-    color: var(--text-normal);
+.voice-assistant-muted-description,
+.voice-assistant-empty-state,
+.voice-assistant-model-meta {
+	color: var(--text-muted);
 }
 
-.wake-word-item button {
-    background: var(--interactive-accent);
-    color: var(--text-on-accent);
-    border: none;
-    padding: 4px 8px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.9em;
-    transition: background-color 0.2s;
+.voice-assistant-empty-state {
+	font-style: italic;
 }
 
-.wake-word-item button:hover {
-    background: var(--interactive-accent-hover);
+.voice-assistant-description,
+.voice-assistant-help {
+	color: var(--text-muted);
+	line-height: var(--line-height-normal);
 }
 
-/* 添加唤醒词输入框样式 */
-.wake-word-add {
-    display: flex;
-    gap: 10px;
-    margin-top: 10px;
-    padding: 10px;
-    background: var(--background-primary-alt);
-    border-radius: 6px;
+.voice-assistant-description p,
+.voice-assistant-help p {
+	margin-block: var(--size-4-2);
 }
 
-.wake-word-add input {
-    flex-grow: 1;
-    padding: 6px 10px;
-    border: 1px solid var(--background-modifier-border);
-    border-radius: 4px;
-    background: var(--background-primary);
-    color: var(--text-normal);
+.voice-assistant-model-card,
+.voice-assistant-prompt-card,
+.voice-assistant-settings .wake-word-item {
+	margin-block: var(--size-4-2);
+	padding: var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
 }
 
-.wake-word-add button {
-    background: var(--interactive-accent);
-    color: var(--text-on-accent);
-    border: none;
-    padding: 6px 12px;
-    border-radius: 4px;
-    cursor: pointer;
-    transition: background-color 0.2s;
+.voice-assistant-model-info {
+	line-height: var(--line-height-normal);
 }
 
-.wake-word-add button:hover {
-    background: var(--interactive-accent-hover);
+.voice-assistant-delete-button {
+	margin-top: var(--size-4-2);
 }
 
-/* 状态指示器样式 */
-.voice-status {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
-    border-radius: 12px;
-    font-size: 0.85em;
-    font-weight: 500;
+.voice-assistant-settings .wake-word-item,
+.voice-assistant-settings .wake-word-add,
+.voice-assistant-prompt-header,
+.voice-assistant-prompt-actions {
+	display: flex;
+	align-items: center;
+	gap: var(--size-4-2);
 }
 
-.voice-status.listening {
-    background: #10b981;
-    color: white;
+.voice-assistant-settings .wake-word-item,
+.voice-assistant-prompt-header {
+	justify-content: space-between;
 }
 
-.voice-status.recording {
-    background: #ef4444;
-    color: white;
+.voice-assistant-settings .wake-word-item span,
+.voice-assistant-settings .wake-word-add input {
+	flex: 1;
 }
 
-.voice-status.processing {
-    background: #f59e0b;
-    color: white;
+.voice-assistant-settings .wake-word-add {
+	margin-top: var(--size-4-2);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background: var(--background-primary-alt);
 }
 
-.voice-status.idle {
-    background: var(--background-secondary);
-    color: var(--text-muted);
+.voice-assistant-prompt-header,
+.voice-assistant-prompt-trigger {
+	margin-bottom: var(--size-4-2);
 }
 
-/* 状态指示器动画 */
-.voice-status.listening::before,
-.voice-status.recording::before {
-    content: "●";
-    animation: pulse 1.5s infinite;
+.voice-assistant-prompt-title {
+	font-weight: var(--font-semibold);
 }
 
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
+.voice-assistant-prompt-text {
+	margin-top: var(--size-4-1);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 }
 
-/* 测试按钮样式 */
-.test-button {
-    background: var(--interactive-accent);
-    color: var(--text-on-accent);
-    border: none;
-    padding: 8px 16px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.9em;
-    transition: all 0.2s;
-    margin: 5px;
+.voice-assistant-prompt-actions {
+	margin-top: var(--size-4-3);
 }
 
-.test-button:hover {
-    background: var(--interactive-accent-hover);
-    transform: translateY(-1px);
+.voice-assistant-prompt-action {
+	font-size: var(--font-smallest);
 }
 
-.test-button:active {
-    transform: translateY(0);
+/* 浮动状态面板使用插件专属类名，避免影响 Obsidian 或其他插件。 */
+.voice-assistant-status-float {
+	position: fixed;
+	right: var(--size-4-5);
+	bottom: var(--size-4-5);
+	z-index: var(--layer-popover);
+	display: block;
+	width: min(22rem, calc(100vw - var(--size-4-8)));
+	max-height: min(26rem, calc(100vh - var(--size-4-8)));
+	overflow: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	box-shadow: var(--shadow-l);
 }
 
-/* 帮助信息样式 */
-.help-section {
-    background: var(--background-secondary);
-    padding: 15px;
-    border-radius: 8px;
-    margin-top: 20px;
-    border-left: 4px solid var(--interactive-accent);
+.voice-assistant-status-float.is-hidden {
+	display: none;
 }
 
-.help-section h4 {
-    color: var(--text-accent);
-    margin-top: 0;
-    margin-bottom: 10px;
+.voice-assistant-status-float.is-dragged {
+	left: var(--voice-assistant-left);
+	top: var(--voice-assistant-top);
+	right: auto;
+	bottom: auto;
 }
 
-.help-section p {
-    margin: 8px 0;
-    line-height: 1.5;
+.voice-assistant-status-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: var(--size-4-2) var(--size-4-3);
+	background: var(--background-secondary);
+	cursor: move;
+	user-select: none;
 }
 
-.help-section a {
-    color: var(--text-accent);
-    text-decoration: none;
+.voice-assistant-status-title {
+	font-weight: var(--font-semibold);
 }
 
-.help-section a:hover {
-    text-decoration: underline;
+.voice-assistant-status-title.is-active {
+	color: var(--text-accent);
 }
 
-/* 配置组样式 */
-.config-group {
-    background: var(--background-primary-alt);
-    padding: 15px;
-    border-radius: 8px;
-    margin: 10px 0;
-    border: 1px solid var(--background-modifier-border);
+.voice-assistant-close-button {
+	padding: 0 var(--size-4-2);
+	border: 0;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: var(--font-ui-large);
 }
 
-.config-group-title {
-    font-weight: 600;
-    color: var(--text-accent);
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
+.voice-assistant-content {
+	max-height: 15rem;
+	overflow-y: auto;
+	padding: var(--size-4-3);
 }
 
-.config-group-title::before {
-    content: "▶";
-    font-size: 0.8em;
-    transition: transform 0.2s;
+.voice-assistant-status-message {
+	display: flex;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-1);
+	line-height: var(--line-height-tight);
 }
 
-.config-group.collapsed .config-group-title::before {
-    transform: rotate(90deg);
+.voice-assistant-status-timestamp {
+	flex: none;
+	color: var(--text-muted);
 }
 
-/* 错误提示样式 */
-.error-message {
-    background: var(--background-modifier-error);
-    color: var(--text-error);
-    padding: 10px;
-    border-radius: 6px;
-    margin: 10px 0;
-    border-left: 4px solid var(--text-error);
+.voice-assistant-status-timestamp.is-success {
+	color: var(--text-success);
 }
 
-/* 成功提示样式 */
-.success-message {
-    background: #10b981;
-    color: white;
-    padding: 10px;
-    border-radius: 6px;
-    margin: 10px 0;
-    border-left: 4px solid #10b981;
+.voice-assistant-status-timestamp.is-error {
+	color: var(--text-error);
 }
 
-/* 警告提示样式 */
-.warning-message {
-    background: #f59e0b;
-    color: white;
-    padding: 10px;
-    border-radius: 6px;
-    margin: 10px 0;
-    border-left: 4px solid #f59e0b;
+.voice-assistant-status-timestamp.is-warning {
+	color: var(--text-warning);
 }
 
-/* 响应式设计 */
+.voice-assistant-status-message-text {
+	overflow-wrap: anywhere;
+}
+
+.voice-assistant-controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	padding: var(--size-4-3);
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.voice-assistant-control-button {
+	flex: 1 1 auto;
+}
+
+.voice-assistant-controls .is-hidden {
+	display: none;
+}
+
+.voice-assistant-status-bar.is-active {
+	color: var(--text-success);
+}
+
+.voice-assistant-status-bar.is-inactive {
+	color: var(--text-muted);
+}
+
 @media (max-width: 768px) {
-    .voice-assistant-settings {
-        padding: 10px;
-    }
-    
-    .wake-word-item {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 8px;
-    }
-    
-    .wake-word-add {
-        flex-direction: column;
-    }
-}
+	.voice-assistant-settings {
+		padding: var(--size-4-2);
+	}
 
-/* 深色主题适配 */
-.theme-dark .voice-assistant-settings {
-    /* 深色主题下的特殊样式调整 */
-    background: var(--background-primary);
-}
-
-/* 浅色主题适配 */
-.theme-light .voice-assistant-settings {
-    /* 浅色主题下的特殊样式调整 */
-    background: var(--background-primary);
-}
-
-/* 设置项间距调整 */
-.setting-item {
-    margin-bottom: 15px;
-}
-
-.setting-item:last-child {
-    margin-bottom: 0;
-}
-
-/* 下拉菜单样式优化 */
-.dropdown {
-    min-width: 150px;
-}
-
-/* 输入框样式优化 */
-.setting-item input[type="text"],
-.setting-item input[type="password"] {
-    width: 100%;
-    max-width: 300px;
-}
-
-/* 切换开关样式 */
-.checkbox-container {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-/* 按钮组样式 */
-.button-group {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-top: 10px;
-}
-
-.button-group .test-button {
-    margin: 0;
-}
-
-/* 进度条样式 */
-.progress-bar {
-    width: 100%;
-    height: 6px;
-    background: var(--background-modifier-border);
-    border-radius: 3px;
-    overflow: hidden;
-    margin: 10px 0;
-}
-
-.progress-bar-fill {
-    height: 100%;
-    background: var(--interactive-accent);
-    transition: width 0.3s ease;
-}
-
-/* 音频波形可视化样式 */
-.audio-visualizer {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 60px;
-    background: var(--background-secondary);
-    border-radius: 8px;
-    margin: 10px 0;
-    gap: 2px;
-    padding: 10px;
-}
-
-.audio-bar {
-    width: 3px;
-    background: var(--interactive-accent);
-    border-radius: 2px;
-    transition: height 0.1s ease;
-}
-
-/* 工具提示样式 */
-.tooltip {
-    position: relative;
-    cursor: help;
-}
-
-.tooltip::after {
-    content: attr(data-tooltip);
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    background: var(--background-secondary);
-    color: var(--text-normal);
-    padding: 6px 10px;
-    border-radius: 4px;
-    font-size: 0.8em;
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s;
-    z-index: 1000;
-    border: 1px solid var(--background-modifier-border);
-}
-
-.tooltip:hover::after {
-    opacity: 1;
+	.voice-assistant-settings .wake-word-add {
+		align-items: stretch;
+		flex-direction: column;
+	}
 }
