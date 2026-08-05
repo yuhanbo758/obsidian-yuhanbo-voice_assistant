@@ -1,5 +1,138 @@
-import { App, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, requestUrl, Setting } from 'obsidian';
-import * as CryptoJS from 'crypto-js';
+import { App, Editor, EditorPosition, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, requestUrl, Setting } from 'obsidian';
+
+/** 兼容旧版 Chromium 中带 webkit 前缀的音频上下文。 */
+interface AudioContextWindow extends Window {
+	webkitAudioContext?: typeof AudioContext;
+}
+
+/** 讯飞 ASR WebSocket 响应。 */
+interface XunfeiAsrResponse {
+	code: number;
+	message?: string;
+	data?: {
+		status?: number;
+		result?: {
+			ws?: Array<{ cw?: Array<{ w?: string }> }>;
+		};
+	};
+}
+
+/** 讯飞 TTS WebSocket 响应。 */
+interface XunfeiTtsResponse {
+	code: number;
+	message?: string;
+	data?: {
+		audio?: string;
+		status?: number;
+	};
+}
+
+/** 讯飞星火 WebSocket 响应。 */
+interface XunfeiSparkResponse {
+	header?: {
+		code?: number;
+		message?: string;
+		status?: number;
+	};
+	payload?: {
+		choices?: {
+			text?: Array<{ content?: string }>;
+		};
+	};
+}
+
+/** Google Generative Language API 响应的最小子集。 */
+interface GoogleAiResponse {
+	error?: { message?: string };
+	candidates?: Array<{
+		content?: {
+			parts?: Array<{ text?: string }>;
+		};
+	}>;
+}
+
+/** OpenRouter chat completions 响应的最小子集。 */
+interface OpenRouterResponse {
+	choices?: Array<{
+		message?: { content?: string };
+	}>;
+}
+
+/**
+ * 将外部 JSON 解析为指定响应结构。
+ * 调用点仍会检查必需字段，该函数只集中隔离 JSON.parse 的 any 返回值。
+ */
+function parseJsonResponse<T>(source: string): T {
+	const parsed: unknown = JSON.parse(source);
+	return parsed as T;
+}
+
+/** 将任意抛出值归一化为 Error，避免 Promise 使用非 Error 拒绝原因。 */
+function normalizeError(reason: unknown, fallbackMessage = '未知错误'): Error {
+	if (reason instanceof Error) {
+		return reason;
+	}
+	return new Error(typeof reason === 'string' ? reason : fallbackMessage);
+}
+
+/** 获取可安全展示的错误文本。 */
+function getErrorMessage(reason: unknown): string {
+	return normalizeError(reason).message;
+}
+
+/** 将字节数组转为 Base64，分块处理以避免超大音频导致调用栈溢出。 */
+function bytesToBase64(bytes: Uint8Array): string {
+	let binary = '';
+	const chunkSize = 8192;
+	for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+		binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+	}
+	return window.btoa(binary);
+}
+
+/** 使用标准 Web Crypto API 生成讯飞鉴权所需的 HMAC-SHA256 Base64 签名。 */
+async function hmacSha256Base64(secret: string, content: string): Promise<string> {
+	const encoder = new TextEncoder();
+	const key = await window.crypto.subtle.importKey(
+		'raw',
+		encoder.encode(secret),
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign'],
+	);
+	const signature = await window.crypto.subtle.sign('HMAC', key, encoder.encode(content));
+	return bytesToBase64(new Uint8Array(signature));
+}
+
+/** 按 UTF-8 字节编码文本，替代已废弃的 unescape 组合。 */
+function encodeUtf8ToBase64(text: string): string {
+	return bytesToBase64(new TextEncoder().encode(text));
+}
+
+/** 创建当前 Obsidian 窗口所属的音频上下文。 */
+function createAudioContext(): AudioContext {
+	const AudioContextConstructor = window.AudioContext ?? (window as AudioContextWindow).webkitAudioContext;
+	if (!AudioContextConstructor) {
+		throw new Error('当前环境不支持 Web Audio API');
+	}
+	return new AudioContextConstructor();
+}
+
+/**
+ * 按浏览器真实支持情况创建录音器。
+ * 不伪装音频格式：如果指定格式均不可用，则让浏览器选择默认容器和编码器。
+ */
+function createCompatibleMediaRecorder(stream: MediaStream): MediaRecorder {
+	const preferredMimeTypes = [
+		'audio/webm;codecs=opus',
+		'audio/webm',
+		'audio/mp4',
+	];
+	const mimeType = preferredMimeTypes.find(candidate => MediaRecorder.isTypeSupported(candidate));
+	return mimeType
+		? new MediaRecorder(stream, { mimeType })
+		: new MediaRecorder(stream);
+}
 
 // 插件设置接口定义
 interface VoiceAssistantSettings {
@@ -137,28 +270,28 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private statusFloat: HTMLElement | null = null;
 	private currentAudio: HTMLAudioElement | null = null;
 	private isPlaying = false;
-	private autoHideTimer: NodeJS.Timeout | null = null;
+	private autoHideTimer: number | null = null;
 	private wakeStatusBarItem: HTMLElement | null = null;
 	
 	// 持续对话状态管理
 	private isInContinuousDialog = false;
 	private conversationHistory: Array<{user: string, assistant: string, timestamp: Date}> = [];
-	private silenceTimer: NodeJS.Timeout | null = null;
+	private silenceTimer: number | null = null;
 	private silenceDetectionDuration = 20000; // 20秒静默检测
 	
 	// 背景语音检测
 	private backgroundVoiceDetection = false;
 	private backgroundMediaRecorder: MediaRecorder | null = null;
 	private backgroundStream: MediaStream | null = null;
-	private voiceDetectionTimer: NodeJS.Timeout | null = null;
+	private voiceDetectionTimer: number | null = null;
 	
 	// 持续听写相关属性
 	private isDictating = false;
-	private dictationTimer: NodeJS.Timeout | null = null;
+	private dictationTimer: number | null = null;
 	private dictationStartTime: number = 0;
 	private dictationAudioChunks: Blob[] = []; // 累积的音频片段
 	private lastVoiceDetectedTime: number = 0; // 最后检测到语音的时间
-	private silenceCheckTimer: NodeJS.Timeout | null = null; // 静默检测定时器
+	private silenceCheckTimer: number | null = null; // 静默检测定时器
 	
 	// 预录音缓冲区相关
 	private preRecordingBuffer: Blob[] = []; // 预录音缓冲区
@@ -253,13 +386,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 
 		// 清理自动隐藏定时器
 		if (this.autoHideTimer) {
-			clearTimeout(this.autoHideTimer);
+			window.clearTimeout(this.autoHideTimer);
 			this.autoHideTimer = null;
 		}
 		
 		// 清理听写相关定时器
 		if (this.silenceCheckTimer) {
-			clearTimeout(this.silenceCheckTimer);
+			window.clearTimeout(this.silenceCheckTimer);
 			this.silenceCheckTimer = null;
 		}
 		
@@ -272,7 +405,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 * 加载插件设置
 	 */
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const savedSettings = await this.loadData() as Partial<VoiceAssistantSettings> | null;
+		this.settings = { ...DEFAULT_SETTINGS, ...(savedSettings ?? {}) };
 	}
 
 	/**
@@ -285,7 +419,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	/**
 	 * 调试日志输出
 	 */
-	private debugLog(message: string, ...args: any[]) {
+	private debugLog(message: string, ...args: unknown[]) {
 		// 生产版本不向控制台输出笔记、音频、凭据或第三方响应。
 		// 保留该方法以兼容现有调用点，并避免泄露用户内容。
 		void message;
@@ -304,7 +438,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			await this.textToSpeech(testText);
 			new Notice('TTS测试完成');
 		} catch (error) {
-			new Notice(`TTS测试失败: ${error.message}`);
+			new Notice(`TTS测试失败: ${getErrorMessage(error)}`);
 		}
 	}
 
@@ -339,7 +473,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.conversationHistory = [];
 		
 		// 启动预录音缓冲
-		this.startPreRecordingBuffer();
+		void this.startPreRecordingBuffer();
 		
 		// 显示对话控制界面
 		if (this.settings.showDialogControls) {
@@ -410,8 +544,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 		if (this.settings.ttsMode !== 'disabled') {
 			// 在持续对话模式下，TTS播放期间启动背景语音检测和预录音缓冲
 			if (this.isInContinuousDialog) {
-				this.startBackgroundVoiceDetection();
-				this.startPreRecordingBuffer();
+				void this.startBackgroundVoiceDetection();
+				void this.startPreRecordingBuffer();
 			}
 			await this.textToSpeech(response);
 			// TTS播放完成后停止背景语音检测，但保持预录音缓冲
@@ -506,7 +640,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.lastVoiceDetectedTime = Date.now();
 
 		// 启动总体静默超时检测定时器
-		this.dictationTimer = setInterval(() => {
+		this.dictationTimer = window.setInterval(() => {
 			if (!this.isDictating) {
 				return;
 			}
@@ -548,7 +682,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 					
 					// 清除之前的静默检测定时器
 					if (this.silenceCheckTimer) {
-						clearTimeout(this.silenceCheckTimer);
+						window.clearTimeout(this.silenceCheckTimer);
 						this.silenceCheckTimer = null;
 					}
 				} else {
@@ -585,7 +719,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 * 处理累积的音频片段进行语音识别
 	 * @returns 识别到的文本，如果没有识别到则返回空字符串
 	 */
-	private async processAccumulatedAudio(editor: any, insertPosition: any): Promise<string> {
+	private async processAccumulatedAudio(editor: Editor, insertPosition: EditorPosition): Promise<string> {
 		if (this.dictationAudioChunks.length === 0) {
 			return '';
 		}
@@ -593,8 +727,11 @@ export default class VoiceAssistantPlugin extends Plugin {
 		try {
 			this.updateStatusFloat('正在识别语音...', 'info', false);
 			
-			// 合并所有音频片段
-			const combinedAudioBlob = new Blob(this.dictationAudioChunks, { type: 'audio/wav' });
+			// 合并所有音频片段，并保留录音器返回的真实容器格式。
+			// Chromium 可以连续解码这些同格式片段；错误标记为 WAV 会在部分版本中导致解码失败。
+			const combinedAudioBlob = new Blob(this.dictationAudioChunks, {
+				type: this.dictationAudioChunks[0]?.type || 'application/octet-stream'
+			});
 			
 			// 进行语音识别
 			const recognizedText = await this.speechToText(combinedAudioBlob);
@@ -629,32 +766,42 @@ export default class VoiceAssistantPlugin extends Plugin {
 		return new Promise((resolve, reject) => {
 			navigator.mediaDevices.getUserMedia({ audio: true })
 				.then(stream => {
-					const mediaRecorder = new MediaRecorder(stream);
+					let mediaRecorder: MediaRecorder;
+					try {
+						mediaRecorder = createCompatibleMediaRecorder(stream);
+					} catch (error) {
+						stream.getTracks().forEach(track => track.stop());
+						throw normalizeError(error, '无法创建录音器');
+					}
 					const audioChunks: Blob[] = [];
 
 					mediaRecorder.ondataavailable = (event) => {
-						audioChunks.push(event.data);
+						if (event.data.size > 0) {
+							audioChunks.push(event.data);
+						}
 					};
 
 					mediaRecorder.onstop = () => {
-						const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+						const audioBlob = new Blob(audioChunks, {
+							type: mediaRecorder.mimeType || audioChunks[0]?.type || 'application/octet-stream'
+						});
 						stream.getTracks().forEach(track => track.stop());
 						resolve(audioBlob);
 					};
 
 					mediaRecorder.onerror = (error) => {
 						stream.getTracks().forEach(track => track.stop());
-						reject(error);
+						reject(normalizeError(error, '录音过程出错'));
 					};
 
 					mediaRecorder.start();
-					setTimeout(() => {
+					window.setTimeout(() => {
 						if (mediaRecorder.state === 'recording') {
 							mediaRecorder.stop();
 						}
 					}, duration);
 				})
-				.catch(reject);
+				.catch((error: unknown) => reject(normalizeError(error, '无法访问麦克风')));
 		});
 	}
 
@@ -825,7 +972,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.isDictating = false;
 		
 		if (this.dictationTimer) {
-			clearInterval(this.dictationTimer);
+			window.clearInterval(this.dictationTimer);
 			this.dictationTimer = null;
 		}
 		
@@ -955,37 +1102,44 @@ export default class VoiceAssistantPlugin extends Plugin {
 				} 
 			})
 			.then(stream => {
-				// 尝试使用支持的音频格式
-				const options = { mimeType: 'audio/webm;codecs=opus' };
-				if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-					// 如果不支持webm，尝试其他格式
-					options.mimeType = 'audio/mp4';
-					if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-						options.mimeType = 'audio/wav';
-					}
+				try {
+					this.mediaRecorder = createCompatibleMediaRecorder(stream);
+				} catch (error) {
+					stream.getTracks().forEach(track => track.stop());
+					throw normalizeError(error, '无法创建录音器');
 				}
-				
-				this.debugLog('使用音频格式:', options.mimeType);
-				this.mediaRecorder = new MediaRecorder(stream, options);
+
+				const mediaRecorder = this.mediaRecorder;
+				this.debugLog('使用音频格式:', mediaRecorder.mimeType || '浏览器默认格式');
 				this.audioChunks = [];
 				this.isRecording = true;
 
-				this.mediaRecorder.ondataavailable = (event) => {
-					this.audioChunks.push(event.data);
+				mediaRecorder.ondataavailable = (event) => {
+					if (event.data.size > 0) {
+						this.audioChunks.push(event.data);
+					}
 				};
 
-				this.mediaRecorder.onstop = () => {
-					const audioBlob = new Blob(this.audioChunks, { type: options.mimeType });
+				mediaRecorder.onstop = () => {
+					const audioBlob = new Blob(this.audioChunks, {
+						type: mediaRecorder.mimeType || this.audioChunks[0]?.type || 'application/octet-stream'
+					});
 					stream.getTracks().forEach(track => track.stop());
 					this.isRecording = false;
 					this.debugLog('录音完成，音频大小:', audioBlob.size, '字节');
 					resolve(audioBlob);
 				};
 
-				this.mediaRecorder.start();
+				mediaRecorder.onerror = (event) => {
+					stream.getTracks().forEach(track => track.stop());
+					this.isRecording = false;
+					reject(normalizeError(event, '录音过程出错'));
+				};
+
+				mediaRecorder.start();
 
 				// 5秒后自动停止录音
-				setTimeout(() => {
+				window.setTimeout(() => {
 					if (this.mediaRecorder && this.isRecording) {
 						this.mediaRecorder.stop();
 					}
@@ -1020,7 +1174,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 */
 	private async convertToPCM(audioBlob: Blob): Promise<string> {
 		return new Promise((resolve, reject) => {
-			const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+			const audioContext = createAudioContext();
 			const fileReader = new FileReader();
 			
 			fileReader.onload = async () => {
@@ -1030,7 +1184,6 @@ export default class VoiceAssistantPlugin extends Plugin {
 					
 					// 转换为16kHz单声道PCM
 					const sampleRate = 16000;
-					const channels = 1;
 					const length = Math.floor(audioBuffer.duration * sampleRate);
 					const pcmData = new Float32Array(length);
 					
@@ -1059,14 +1212,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 						binaryString += String.fromCharCode.apply(null, Array.from(chunk));
 					}
 					
-					const base64 = btoa(binaryString);
+					const base64 = window.btoa(binaryString);
 					resolve(base64);
 				} catch (error) {
-					reject(error);
+					reject(normalizeError(error, '音频转换失败'));
 				}
 			};
 			
-			fileReader.onerror = reject;
+			fileReader.onerror = () => reject(new Error('读取音频文件失败'));
 			fileReader.readAsArrayBuffer(audioBlob);
 		});
 	}
@@ -1091,10 +1244,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 			// 生成鉴权参数 - 按照讯飞官方文档格式
 			const date = new Date().toUTCString();
 			const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
-			const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, apiSecret);
-			const signature = CryptoJS.enc.Base64.stringify(signatureSha);
+			const signature = await hmacSha256Base64(apiSecret, signatureOrigin);
 			const authorizationOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
-			const authorization = encodeURIComponent(btoa(authorizationOrigin));
+			const authorization = encodeURIComponent(window.btoa(authorizationOrigin));
 			
 			const url = `wss://${host}${path}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
 			
@@ -1130,7 +1282,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				ws.onmessage = (event: MessageEvent) => {
 					try {
-						const data = JSON.parse(event.data);
+						const data = parseJsonResponse<XunfeiAsrResponse>(String(event.data));
 						this.debugLog('收到ASR响应:', JSON.stringify(data, null, 2));
 						
 						if (data.code !== 0) {
@@ -1141,8 +1293,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 						
 						if (data.data && data.data.result) {
 							hasReceivedData = true;
-							const text = data.data.result.ws.map((item: any) => 
-								item.cw.map((word: any) => word.w).join('')
+							const text = (data.data.result.ws ?? []).map(item =>
+								(item.cw ?? []).map(word => word.w ?? '').join('')
 							).join('');
 							result += text;
 							this.debugLog('识别到文本片段:', text);
@@ -1155,7 +1307,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 						}
 					} catch (error) {
 						this.debugLog('解析ASR响应时出错:', error);
-						reject(error);
+						reject(normalizeError(error, '解析 ASR 响应失败'));
 					}
 				};
 				
@@ -1174,7 +1326,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			
 		} catch (error) {
 			this.debugLog('讯飞在线 ASR 错误:', error);
-			throw error;
+			throw normalizeError(error, '讯飞在线 ASR 调用失败');
 		}
 	}
 
@@ -1228,7 +1380,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				throw new Error(`Google AI API 调用失败: ${response.status} - ${errorText}`);
 			}
 
-			const data = response.json;
+			const data = response.json as GoogleAiResponse;
 			this.debugLog('Google AI 完整响应:', data);
 			
 			// 检查是否有错误信息
@@ -1250,11 +1402,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 			}
 			
 			const result = candidate.content.parts[0].text;
+			if (typeof result !== 'string') {
+				throw new Error('Google AI 返回的内容格式不正确 - text 不是字符串');
+			}
 			this.debugLog('Google AI 返回结果:', result);
 			return result;
 		} catch (error) {
 			this.debugLog('Google AI 调用错误:', error);
-			throw error;
+			throw normalizeError(error, 'Google AI 调用失败');
 		}
 	}
 
@@ -1282,7 +1437,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				throw new Error(`OpenRouter API 错误: ${response.status}`);
 			}
 
-			const data = response.json;
+			const data = response.json as OpenRouterResponse;
 			
 			// 检查响应格式
 			if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
@@ -1299,7 +1454,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			return choice.message.content;
 		} catch (error) {
 			this.debugLog('OpenRouter 调用错误:', error);
-			throw error;
+			throw normalizeError(error, 'OpenRouter 调用失败');
 		}
 	}
 
@@ -1376,13 +1531,12 @@ export default class VoiceAssistantPlugin extends Plugin {
 			// 构建签名字符串
 			const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
 			
-			// 使用 HMAC-SHA256 生成签名
-			const crypto = require('crypto');
-			const signature = crypto.createHmac('sha256', apiSecret).update(signatureOrigin).digest('base64');
+			// 使用浏览器标准 Web Crypto API 生成签名。
+			const signature = await hmacSha256Base64(apiSecret, signatureOrigin);
 			
 			// 构建鉴权参数
 			const authorizationOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
-			const authorization = Buffer.from(authorizationOrigin).toString('base64');
+			const authorization = encodeUtf8ToBase64(authorizationOrigin);
 			
 			// 构建WebSocket URL
 			const url = `wss://${host}${path}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
@@ -1392,10 +1546,10 @@ export default class VoiceAssistantPlugin extends Plugin {
 			return new Promise((resolve, reject) => {
 				const ws = new WebSocket(url);
 				let result = '';
-				let timeout: NodeJS.Timeout;
+				let timeout: number;
 				
 				// 设置超时
-				timeout = setTimeout(() => {
+				timeout = window.setTimeout(() => {
 					ws.close();
 					reject(new Error('讯飞星火调用超时'));
 				}, 30000);
@@ -1429,12 +1583,12 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				ws.onmessage = (event: MessageEvent) => {
 					try {
-						const data = JSON.parse(event.data);
+						const data = parseJsonResponse<XunfeiSparkResponse>(String(event.data));
 						this.debugLog('讯飞星火响应:', data);
 						
 						// 检查错误
 						if (data.header && data.header.code !== 0) {
-							clearTimeout(timeout);
+							window.clearTimeout(timeout);
 							const errorMsg = `讯飞星火API错误: ${data.header.message || '未知错误'} (代码: ${data.header.code})`;
 							this.debugLog(errorMsg);
 							reject(new Error(errorMsg));
@@ -1452,7 +1606,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 						
 						// 检查是否完成
 						if (data.header && data.header.status === 2) {
-							clearTimeout(timeout);
+							window.clearTimeout(timeout);
 							ws.close();
 							this.debugLog('讯飞星火最终结果:', result);
 							resolve(result || '讯飞星火返回了空响应');
@@ -1460,20 +1614,20 @@ export default class VoiceAssistantPlugin extends Plugin {
 					} catch (parseError) {
 						this.debugLog('解析讯飞星火响应时出错:', parseError);
 						this.debugLog('原始响应数据:', event.data);
-						clearTimeout(timeout);
-						reject(new Error(`解析讯飞星火响应失败: ${parseError.message}`));
+						window.clearTimeout(timeout);
+						reject(new Error(`解析讯飞星火响应失败: ${getErrorMessage(parseError)}`));
 					}
 				};
 				
 				ws.onerror = (error) => {
 					this.debugLog('讯飞星火 WebSocket 错误:', error);
-					clearTimeout(timeout);
+					window.clearTimeout(timeout);
 					reject(new Error('讯飞星火连接失败'));
 				};
 				
 				ws.onclose = (event) => {
 					this.debugLog('讯飞星火 WebSocket 连接关闭:', event.code, event.reason);
-					clearTimeout(timeout);
+					window.clearTimeout(timeout);
 					if (!result) {
 						reject(new Error('讯飞星火连接意外关闭'));
 					}
@@ -1482,7 +1636,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			
 		} catch (error) {
 			this.debugLog('讯飞星火调用错误:', error);
-			throw error;
+			throw normalizeError(error, '讯飞星火调用失败');
 		}
 	}
 
@@ -1553,7 +1707,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				throw new Error(`自定义Google AI API 调用失败: ${response.status} - ${errorText}`);
 			}
 
-			const data = response.json;
+			const data = response.json as GoogleAiResponse;
 			this.debugLog('自定义Google AI 完整响应:', data);
 			
 			// 检查是否有错误信息
@@ -1575,11 +1729,14 @@ export default class VoiceAssistantPlugin extends Plugin {
 			}
 			
 			const result = candidate.content.parts[0].text;
+			if (typeof result !== 'string') {
+				throw new Error('自定义 Google AI 返回的 text 不是字符串');
+			}
 			this.debugLog('自定义Google AI 返回结果:', result);
 			return result;
 		} catch (error) {
 			this.debugLog('自定义Google AI调用错误:', error);
-			throw error;
+			throw normalizeError(error, '自定义 Google AI 调用失败');
 		}
 	}
 
@@ -1615,7 +1772,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				throw new Error(`OpenRouter API 错误: ${response.status}`);
 			}
 
-			const data = response.json;
+			const data = response.json as OpenRouterResponse;
 			
 			// 检查响应格式
 			if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
@@ -1632,7 +1789,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			return choice.message.content;
 		} catch (error) {
 			this.debugLog('自定义OpenRouter调用错误:', error);
-			throw error;
+			throw normalizeError(error, '自定义 OpenRouter 调用失败');
 		}
 	}
 
@@ -1669,11 +1826,10 @@ export default class VoiceAssistantPlugin extends Plugin {
 			const headers = `host date request-line`;
 			const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${apiPath} HTTP/1.1`;
 			
-			const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, this.settings.xunfeiApiSecret);
-			const signature = CryptoJS.enc.Base64.stringify(signatureSha);
+			const signature = await hmacSha256Base64(this.settings.xunfeiApiSecret, signatureOrigin);
 			
 			const authorizationOrigin = `api_key="${this.settings.xunfeiApiKey}", algorithm="${algorithm}", headers="${headers}", signature="${signature}"`;
-			const authorization = btoa(authorizationOrigin);
+			const authorization = window.btoa(authorizationOrigin);
 			
 			const wsUrl = `wss://${host}${apiPath}?authorization=${authorization}&date=${date}&host=${host}`;
 
@@ -1682,7 +1838,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				let result = '';
 				
 				// 30秒超时
-				const timeout = setTimeout(() => {
+				const timeout = window.setTimeout(() => {
 					ws.close();
 					reject(new Error('讯飞星火自定义模型调用超时'));
 				}, 30000);
@@ -1719,11 +1875,11 @@ export default class VoiceAssistantPlugin extends Plugin {
 
 				ws.onmessage = (event) => {
 					try {
-						const response = JSON.parse(event.data);
+						const response = parseJsonResponse<XunfeiSparkResponse>(String(event.data));
 						this.debugLog('讯飞星火自定义模型响应:', response);
 						
-						if (response.header.code !== 0) {
-							clearTimeout(timeout);
+						if (response.header?.code !== 0) {
+							window.clearTimeout(timeout);
 							reject(new Error(`讯飞星火自定义模型错误: ${response.header.message}`));
 							return;
 						}
@@ -1735,27 +1891,27 @@ export default class VoiceAssistantPlugin extends Plugin {
 							}
 						}
 						
-						if (response.header.status === 2) {
-							clearTimeout(timeout);
+						if (response.header?.status === 2) {
+							window.clearTimeout(timeout);
 							ws.close();
 							resolve(result);
 						}
 					} catch (error) {
 						this.debugLog('讯飞星火自定义模型解析响应错误:', error);
-						clearTimeout(timeout);
+						window.clearTimeout(timeout);
 						reject(new Error('讯飞星火自定义模型响应解析失败'));
 					}
 				};
 				
 				ws.onerror = (error) => {
 					this.debugLog('讯飞星火自定义模型 WebSocket 错误:', error);
-					clearTimeout(timeout);
+					window.clearTimeout(timeout);
 					reject(new Error('讯飞星火自定义模型连接失败'));
 				};
 				
 				ws.onclose = (event) => {
 					this.debugLog('讯飞星火自定义模型 WebSocket 连接关闭:', event.code, event.reason);
-					clearTimeout(timeout);
+					window.clearTimeout(timeout);
 					if (!result) {
 						reject(new Error('讯飞星火自定义模型连接意外关闭'));
 					}
@@ -1764,7 +1920,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			
 		} catch (error) {
 			this.debugLog('讯飞星火自定义模型调用错误:', error);
-			throw error;
+			throw normalizeError(error, '讯飞星火自定义模型调用失败');
 		}
 	}
 
@@ -1801,10 +1957,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 			// 生成鉴权参数 - 按照讯飞官方文档格式
 			const date = new Date().toUTCString();
 			const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
-			const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, apiSecret);
-			const signature = CryptoJS.enc.Base64.stringify(signatureSha);
+			const signature = await hmacSha256Base64(apiSecret, signatureOrigin);
 			const authorizationOrigin = `api_key="${apiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
-			const authorization = encodeURIComponent(btoa(authorizationOrigin));
+			const authorization = encodeURIComponent(window.btoa(authorizationOrigin));
 			
 			const url = `wss://${host}${path}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
 			
@@ -1831,7 +1986,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 						},
 						data: { 
 							status: 2, 
-							text: btoa(unescape(encodeURIComponent(text))) 
+							text: encodeUtf8ToBase64(text)
 						}
 					};
 					this.debugLog('发送TTS参数:', JSON.stringify(params, null, 2));
@@ -1840,7 +1995,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				ws.onmessage = (event: MessageEvent) => {
 					try {
-						const data = JSON.parse(event.data);
+						const data = parseJsonResponse<XunfeiTtsResponse>(String(event.data));
 						this.debugLog('收到TTS响应:', JSON.stringify(data, null, 2));
 						
 						if (data.code !== 0) {
@@ -1880,7 +2035,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 									resolve();
 								}).catch((error) => {
 									this.debugLog('音频播放失败:', error);
-									reject(error);
+									reject(normalizeError(error, '音频播放失败'));
 								});
 							} else {
 								this.debugLog('没有收到音频数据');
@@ -1889,7 +2044,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 						}
 					} catch (error) {
 						this.debugLog('解析TTS响应时出错:', error);
-						reject(error);
+						reject(normalizeError(error, '解析 TTS 响应失败'));
 					}
 				};
 				
@@ -1908,7 +2063,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			
 		} catch (error) {
 			this.debugLog('讯飞在线 TTS 错误:', error);
-			throw error;
+			throw normalizeError(error, '讯飞在线 TTS 调用失败');
 		}
 	}
 
@@ -1945,11 +2100,11 @@ export default class VoiceAssistantPlugin extends Plugin {
 				// 将base64转换为ArrayBuffer (MP3格式)
 				this.debugLog('Base64前50字符:', cleanBase64.substring(0, 50));
 				
-				let binaryString;
+				let binaryString: string;
 				try {
-					binaryString = atob(cleanBase64);
+					binaryString = window.atob(cleanBase64);
 				} catch (decodeError) {
-					throw new Error(`Base64解码失败: ${decodeError.message}`);
+					throw new Error(`Base64解码失败: ${getErrorMessage(decodeError)}`);
 				}
 				
 				// 直接创建MP3音频数据
@@ -2019,7 +2174,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 					this.debugLog('音频播放命令执行成功');
 				}).catch((error) => {
 					this.debugLog('音频播放命令执行失败:', error);
-					reject(error);
+					reject(normalizeError(error, '音频播放失败'));
 				});
 				
 				// 如果设置了保存音频到 Vault
@@ -2041,37 +2196,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 			} catch (error) {
 				this.debugLog('播放音频错误:', error);
-				reject(error);
+				reject(normalizeError(error, '音频播放失败'));
 			}
 		});
-	}
-
-	private async playAudio(audioBuffer: Buffer): Promise<void> {
-		try {
-			const audioBlob = new Blob([audioBuffer], { type: 'audio/wav' });
-			const audioUrl = URL.createObjectURL(audioBlob);
-			const audio = new Audio(audioUrl);
-			
-			audio.play();
-			
-			// 如果设置了保存音频到 Vault
-			if (this.settings.saveAudioToVault) {
-				// 如果是唤醒会话，只保存第一次的音频
-				if (this.isWakeConversation && this.wakeSessionAudioSaved) {
-					this.debugLog('唤醒会话音频已保存，跳过此次保存');
-				} else {
-					await this.saveAudioToVault(audioBuffer);
-					// 如果是唤醒会话，标记音频已保存
-					if (this.isWakeConversation) {
-						this.wakeSessionAudioSaved = true;
-						this.debugLog('唤醒会话音频已保存，标记为已保存状态');
-					}
-				}
-			}
-			
-		} catch (error) {
-			this.debugLog('播放音频错误:', error);
-		}
 	}
 
 	/**
@@ -2092,56 +2219,18 @@ export default class VoiceAssistantPlugin extends Plugin {
 			const filePath = `${this.settings.audioSavePath}/${fileName}`;
 			
 			// 将base64转换为ArrayBuffer
-			const binaryString = atob(base64Audio);
+			const binaryString = window.atob(base64Audio);
 			const bytes = new Uint8Array(binaryString.length);
 			for (let i = 0; i < binaryString.length; i++) {
 				bytes[i] = binaryString.charCodeAt(i);
 			}
 			
-			await this.app.vault.createBinary(filePath, bytes);
+			await this.app.vault.createBinary(filePath, bytes.buffer);
 			this.debugLog(`音频已保存到: ${filePath}`);
 			
 		} catch (error) {
 			this.debugLog('保存音频到 Vault 错误:', error);
 		}
-	}
-
-	/**
-	 * 将音频保存到 Vault
-	 */
-	private async saveAudioToVault(audioBuffer: Buffer): Promise<void> {
-		try {
-			// 确保音频保存文件夹存在
-			const folderPath = this.settings.audioSavePath;
-			const folder = this.app.vault.getAbstractFileByPath(folderPath);
-			
-			if (!folder) {
-				await this.app.vault.createFolder(folderPath);
-			}
-			
-			const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-			const fileName = `voice-${timestamp}.wav`;
-			const filePath = `${this.settings.audioSavePath}/${fileName}`;
-			
-			await this.app.vault.createBinary(filePath, audioBuffer);
-			this.debugLog(`音频已保存到: ${filePath}`);
-			
-		} catch (error) {
-			this.debugLog('保存音频到 Vault 错误:', error);
-		}
-	}
-
-	/**
-	 * 将音频保存到临时文件
-	 */
-	private async saveAudioToTemp(audioBlob: Blob): Promise<string> {
-		const arrayBuffer = await audioBlob.arrayBuffer();
-		const buffer = Buffer.from(arrayBuffer);
-		const tempPath = `temp_audio_${Date.now()}.wav`;
-		
-		// 这里需要使用 Node.js 的 fs 模块来保存文件
-		// 在实际实现中，可能需要使用 Electron 的文件系统 API
-		return tempPath;
 	}
 
 	/**
@@ -2178,7 +2267,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.debugLog('启动语音唤醒监听，模式:', this.settings.wakeMode);
 		
 		if (this.settings.wakeMode === 'online') {
-			this.startOnlineWakeListening();
+			void this.startOnlineWakeListening();
 		}
 		
 		// 更新状态浮窗显示唤醒状态
@@ -2260,7 +2349,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				// 继续下一轮监听
 				if (this.isListening) {
-					setTimeout(() => {
+					window.setTimeout(() => {
 						this.startWakeListeningLoop();
 					}, 100);
 				}
@@ -2270,7 +2359,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				this.debugLog('唤醒监听录音错误:', event);
 				// 重新开始监听
 				if (this.isListening) {
-					setTimeout(() => {
+					window.setTimeout(() => {
 						this.startWakeListeningLoop();
 					}, 1000);
 				}
@@ -2280,7 +2369,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			this.wakeMediaRecorder.start();
 			
 			// 根据配置的间隔时间停止录音进行识别
-			setTimeout(() => {
+			window.setTimeout(() => {
 				if (this.wakeMediaRecorder && this.wakeMediaRecorder.state === 'recording') {
 					this.wakeMediaRecorder.stop();
 				}
@@ -2290,7 +2379,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			this.debugLog('唤醒监听循环错误:', error);
 			// 重新开始监听
 			if (this.isListening) {
-				setTimeout(() => {
+				window.setTimeout(() => {
 					this.startWakeListeningLoop();
 				}, 1000);
 			}
@@ -2347,26 +2436,24 @@ export default class VoiceAssistantPlugin extends Plugin {
 		
 		// 语音回复确认唤醒（不保存此音频）
 		if (this.settings.ttsMode !== 'disabled') {
+			const originalSaveAudio = this.settings.saveAudioToVault;
 			try {
 				// 临时禁用音频保存
-				const originalSaveAudio = this.settings.saveAudioToVault;
 				this.settings.saveAudioToVault = false;
 				
 				await this.textToSpeech('hi，你好');
-				
-				// 恢复音频保存设置
-				this.settings.saveAudioToVault = originalSaveAudio;
 			} catch (error) {
 				this.debugLog('唤醒语音回复失败:', error);
-				// 确保恢复音频保存设置
-				this.settings.saveAudioToVault = this.settings.saveAudioToVault;
+			} finally {
+				// 无论合成是否成功，都恢复用户原始选项。
+				this.settings.saveAudioToVault = originalSaveAudio;
 			}
 		}
 		
 		if (this.settings.autoEnterDialogAfterWake) {
 			// 创建新的唤醒会话
 			this.startNewWakeSession();
-			this.startVoiceConversation();
+			void this.startVoiceConversation();
 		}
 	}
 
@@ -2570,7 +2657,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			}
 			
 			// 等待一秒再测试下一个
-			await new Promise(resolve => setTimeout(resolve, 1000));
+			await new Promise(resolve => window.setTimeout(resolve, 1000));
 		}
 		
 		// 恢复原始设置
@@ -2584,32 +2671,31 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 * 测试单个朗读人
 	 */
 	private async testSingleVoice(voiceId: string, text: string): Promise<boolean> {
-		return new Promise((resolve) => {
-			const { xunfeiAppId, xunfeiApiKey, xunfeiApiSecret } = this.settings;
+		const { xunfeiAppId, xunfeiApiKey, xunfeiApiSecret } = this.settings;
 			
-			if (!xunfeiAppId || !xunfeiApiKey || !xunfeiApiSecret) {
-				resolve(false);
-				return;
-			}
+		if (!xunfeiAppId || !xunfeiApiKey || !xunfeiApiSecret) {
+			return false;
+		}
 
-			// 构建WebSocket连接
-			const host = 'tts-api.xfyun.cn';
-			const path = '/v2/tts';
-			const date = new Date().toUTCString();
+		// 鉴权需要异步 Web Crypto，因此在 Promise 执行器之前完成。
+		const host = 'tts-api.xfyun.cn';
+		const path = '/v2/tts';
+		const date = new Date().toUTCString();
 			
-			const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
-			const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, xunfeiApiSecret);
-			const signature = CryptoJS.enc.Base64.stringify(signatureSha);
-			const authorizationOrigin = `api_key="${xunfeiApiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
-			const authorization = encodeURIComponent(btoa(authorizationOrigin));
+		const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
+		const signature = await hmacSha256Base64(xunfeiApiSecret, signatureOrigin);
+		const authorizationOrigin = `api_key="${xunfeiApiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
+		const authorization = encodeURIComponent(window.btoa(authorizationOrigin));
 			
-			const url = `wss://${host}${path}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
+		const url = `wss://${host}${path}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
+
+		return new Promise((resolve) => {
 			
 			const ws = new WebSocket(url);
 			let testResult = false;
 			
 			// 设置超时
-			const timeout = setTimeout(() => {
+			const timeout = window.setTimeout(() => {
 				ws.close();
 				resolve(false);
 			}, 5000);
@@ -2629,7 +2715,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 					},
 					data: { 
 						status: 2, 
-						text: btoa(unescape(encodeURIComponent(text))) 
+						text: encodeUtf8ToBase64(text)
 					}
 				};
 				ws.send(JSON.stringify(params));
@@ -2637,33 +2723,33 @@ export default class VoiceAssistantPlugin extends Plugin {
 			
 			ws.onmessage = (event: MessageEvent) => {
 				try {
-					const data = JSON.parse(event.data);
+					const data = parseJsonResponse<XunfeiTtsResponse>(String(event.data));
 					if (data.code === 0) {
 						testResult = true;
 						if (data.data && data.data.status === 2) {
-							clearTimeout(timeout);
+							window.clearTimeout(timeout);
 							ws.close();
 							resolve(true);
 						}
 					} else {
-						clearTimeout(timeout);
+						window.clearTimeout(timeout);
 						ws.close();
 						resolve(false);
 					}
-				} catch (error) {
-					clearTimeout(timeout);
+				} catch {
+					window.clearTimeout(timeout);
 					ws.close();
 					resolve(false);
 				}
 			};
 			
 			ws.onerror = () => {
-				clearTimeout(timeout);
+				window.clearTimeout(timeout);
 				resolve(false);
 			};
 			
 			ws.onclose = () => {
-				clearTimeout(timeout);
+				window.clearTimeout(timeout);
 				resolve(testResult);
 			};
 		});
@@ -2693,7 +2779,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			if (selectedText.trim()) {
 				this.updateStatusFloat(`选中文本长度: ${selectedText.length}字符`, 'info');
 				this.updateStatusFloat(`选中文本内容: "${selectedText.substring(0, 100)}${selectedText.length > 100 ? '...' : ''}"`, 'info');
-				this.updateStatusFloat(`Base64编码: ${btoa(unescape(encodeURIComponent(selectedText.trim())))}`, 'info');
+				this.updateStatusFloat(`Base64编码: ${encodeUtf8ToBase64(selectedText.trim())}`, 'info');
 			} else {
 				this.updateStatusFloat('没有选中文本', 'warning');
 				
@@ -2749,10 +2835,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				// 生成签名
 				const signatureOrigin = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
-				const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, xunfeiApiSecret);
-				const signature = CryptoJS.enc.Base64.stringify(signatureSha);
+				const signature = await hmacSha256Base64(xunfeiApiSecret, signatureOrigin);
 				const authorizationOrigin = `api_key="${xunfeiApiKey}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
-				const authorization = encodeURIComponent(btoa(authorizationOrigin));
+				const authorization = encodeURIComponent(window.btoa(authorizationOrigin));
 				
 				const url = `wss://${host}${path}?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
 				
@@ -2781,7 +2866,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 						},
 						data: { 
 							status: 2, 
-							text: btoa(unescape(encodeURIComponent(testText))) 
+							text: encodeUtf8ToBase64(testText)
 						}
 					};
 					
@@ -2791,7 +2876,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				ws.onmessage = (event: MessageEvent) => {
 					try {
-						const data = JSON.parse(event.data);
+						const data = parseJsonResponse<XunfeiTtsResponse>(String(event.data));
 						this.updateStatusFloat(`收到响应: code=${data.code}`, data.code === 0 ? 'success' : 'error');
 						
 						if (data.code !== 0) {
@@ -2823,7 +2908,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				};
 				
 				// 设置超时
-				setTimeout(() => {
+				window.setTimeout(() => {
 					if (!connectionSuccess) {
 						this.updateStatusFloat('连接超时', 'error');
 						ws.close();
@@ -2845,13 +2930,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.removeStatusFloat();
 
 		// 创建浮窗容器
-		this.statusFloat = document.createElement('div');
+		this.statusFloat = createDiv();
 		this.statusFloat.className = 'voice-assistant-status-float';
 
 		// 创建标题栏
-		const header = document.createElement('div');
+		const header = createDiv();
 		header.className = 'voice-assistant-status-header';
-		const titleEl = document.createElement('span');
+		const titleEl = createSpan();
 		titleEl.className = 'voice-assistant-status-title';
 		titleEl.textContent = '语音助手';
 		header.appendChild(titleEl);
@@ -2862,7 +2947,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 
 		this.registerDomEvent(header, 'mousedown', (e: MouseEvent) => {
 			isDragging = true;
-			const rect = this.statusFloat!.getBoundingClientRect();
+			const rect = this.statusFloat.getBoundingClientRect();
 			dragOffset.x = e.clientX - rect.left;
 			dragOffset.y = e.clientY - rect.top;
 			
@@ -2895,7 +2980,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		});
 
 		// 创建关闭按钮
-		const closeBtn = document.createElement('button');
+		const closeBtn = createEl('button');
 		closeBtn.textContent = '×';
 		closeBtn.className = 'voice-assistant-close-button';
 		closeBtn.setAttribute('aria-label', '关闭语音助手状态');
@@ -2903,21 +2988,21 @@ export default class VoiceAssistantPlugin extends Plugin {
 		header.appendChild(closeBtn);
 
 		// 创建内容区域
-		const content = document.createElement('div');
+		const content = createDiv();
 		content.className = 'voice-assistant-content';
 
 		// 创建控制按钮区域
-		const controls = document.createElement('div');
+		const controls = createDiv();
 		controls.className = 'voice-assistant-controls';
 
 		// 暂停/继续按钮
-		const playPauseBtn = document.createElement('button');
+		const playPauseBtn = createEl('button');
 		playPauseBtn.textContent = '⏸️ 暂停';
 		playPauseBtn.className = 'voice-assistant-control-button';
 		playPauseBtn.onclick = () => this.toggleTTSPlayback();
 
 		// 停止按钮
-		const stopBtn = document.createElement('button');
+		const stopBtn = createEl('button');
 		stopBtn.textContent = '⏹️ 停止';
 		stopBtn.className = 'voice-assistant-control-button';
 		stopBtn.onclick = () => this.stopTTS();
@@ -2926,13 +3011,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 		controls.appendChild(stopBtn);
 
 		// 结束对话按钮（仅在持续对话模式下显示）
-		const endDialogBtn = document.createElement('button');
+		const endDialogBtn = createEl('button');
 		endDialogBtn.className = 'voice-assistant-control-button end-dialog-btn is-hidden';
 		endDialogBtn.textContent = '🔚 结束对话';
 		endDialogBtn.onclick = () => this.endContinuousDialogWithSummary();
 
 		// 停止听写按钮（仅在听写模式下显示）
-		const stopDictationBtn = document.createElement('button');
+		const stopDictationBtn = createEl('button');
 		stopDictationBtn.className = 'voice-assistant-control-button stop-dictation-btn is-hidden';
 		stopDictationBtn.textContent = '⏹️ 停止听写';
 		stopDictationBtn.onclick = () => this.stopDictation();
@@ -2983,16 +3068,16 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private updateStatusFloat(message: string, type: 'info' | 'success' | 'error' | 'warning' = 'info', autoHide: boolean = true): void {
 		if (!this.statusFloat) return;
 
-		const content = this.statusFloat.querySelector('.voice-assistant-content') as HTMLElement;
+		const content = this.statusFloat.querySelector('.voice-assistant-content');
 		if (!content) return;
 
 		const timestamp = new Date().toLocaleTimeString();
-		const messageDiv = document.createElement('div');
+		const messageDiv = createDiv();
 		messageDiv.className = 'voice-assistant-status-message';
-		const timestampEl = document.createElement('span');
+		const timestampEl = createSpan();
 		timestampEl.className = `voice-assistant-status-timestamp is-${type}`;
 		timestampEl.textContent = `[${timestamp}]`;
-		const messageEl = document.createElement('span');
+		const messageEl = createSpan();
 		messageEl.className = 'voice-assistant-status-message-text';
 		messageEl.textContent = message;
 		messageDiv.append(timestampEl, messageEl);
@@ -3011,7 +3096,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 
 		// 清除之前的自动隐藏定时器
 		if (this.autoHideTimer) {
-			clearTimeout(this.autoHideTimer);
+			window.clearTimeout(this.autoHideTimer);
 		}
 
 		// 根据消息类型设置自动隐藏时间
@@ -3034,7 +3119,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 					break;
 			}
 
-			this.autoHideTimer = setTimeout(() => {
+			this.autoHideTimer = window.setTimeout(() => {
 				// 再次检查是否还在播放，如果还在播放则不隐藏
 				if (!this.isPlaying) {
 					this.hideStatusFloat();
@@ -3075,7 +3160,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			this.updateStatusFloat('音频已暂停', 'info');
 			this.updatePlayPauseButton('▶️ 继续');
 		} else {
-			this.currentAudio.play();
+			void this.currentAudio.play();
 			this.isPlaying = true;
 			this.updateStatusFloat('音频继续播放', 'info');
 			this.updatePlayPauseButton('⏸️ 暂停');
@@ -3101,7 +3186,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 */
 	private updatePlayPauseButton(text: string): void {
 		if (!this.statusFloat) return;
-		const playPauseBtn = this.statusFloat.querySelector('.voice-assistant-controls button') as HTMLButtonElement;
+		const playPauseBtn = this.statusFloat.querySelector('.voice-assistant-controls button');
 		if (playPauseBtn) {
 			playPauseBtn.textContent = text;
 		}
@@ -3117,9 +3202,9 @@ export default class VoiceAssistantPlugin extends Plugin {
 		this.clearSilenceTimer();
 		this.debugLog('启动静默检测，20秒后自动结束对话');
 		
-		this.silenceTimer = setTimeout(() => {
+		this.silenceTimer = window.setTimeout(() => {
 			this.debugLog('检测到20秒静默，自动结束对话');
-			this.endContinuousDialogWithSummary();
+			void this.endContinuousDialogWithSummary();
 		}, this.silenceDetectionDuration);
 	}
 
@@ -3128,7 +3213,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 	 */
 	private clearSilenceTimer(): void {
 		if (this.silenceTimer) {
-			clearTimeout(this.silenceTimer);
+			window.clearTimeout(this.silenceTimer);
 			this.silenceTimer = null;
 		}
 	}
@@ -3157,7 +3242,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		// 如果是唤醒对话，生成总结并保存到指定文件
 		if (this.isWakeConversation && this.wakeSessionFileName) {
 			this.debugLog('检测到唤醒对话结束，开始生成总结');
-			this.generateWakeConversationSummary();
+			void this.generateWakeConversationSummary();
 			this.endWakeSession(); // 结束唤醒会话
 		}
 		
@@ -3203,13 +3288,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private showDialogControls(): void {
 		// 在状态浮窗中显示结束对话按钮
 		if (this.statusFloat) {
-			const endDialogBtn = this.statusFloat.querySelector('.end-dialog-btn') as HTMLButtonElement;
+			const endDialogBtn = this.statusFloat.querySelector('.end-dialog-btn');
 			if (endDialogBtn) {
 				endDialogBtn.removeClass('is-hidden');
 			}
 			
 			// 更新状态浮窗标题显示持续对话状态
-			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title');
 			if (title) {
 				title.textContent = '语音助手 - 持续对话中';
 				title.addClass('is-active');
@@ -3223,13 +3308,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private hideDialogControls(): void {
 		// 在状态浮窗中隐藏结束对话按钮
 		if (this.statusFloat) {
-			const endDialogBtn = this.statusFloat.querySelector('.end-dialog-btn') as HTMLButtonElement;
+			const endDialogBtn = this.statusFloat.querySelector('.end-dialog-btn');
 			if (endDialogBtn) {
 				endDialogBtn.addClass('is-hidden');
 			}
 			
 			// 恢复状态浮窗标题
-			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title');
 			if (title) {
 				title.textContent = '语音助手';
 				title.removeClass('is-active');
@@ -3243,13 +3328,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private showDictationControls(): void {
 		// 在状态浮窗中显示停止听写按钮
 		if (this.statusFloat) {
-			const stopDictationBtn = this.statusFloat.querySelector('.stop-dictation-btn') as HTMLButtonElement;
+			const stopDictationBtn = this.statusFloat.querySelector('.stop-dictation-btn');
 			if (stopDictationBtn) {
 				stopDictationBtn.removeClass('is-hidden');
 			}
 			
 			// 更新状态浮窗标题显示听写状态
-			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title');
 			if (title) {
 				title.textContent = '语音助手 - 听写中';
 				title.addClass('is-active');
@@ -3263,13 +3348,13 @@ export default class VoiceAssistantPlugin extends Plugin {
 	private hideDictationControls(): void {
 		// 在状态浮窗中隐藏停止听写按钮
 		if (this.statusFloat) {
-			const stopDictationBtn = this.statusFloat.querySelector('.stop-dictation-btn') as HTMLButtonElement;
+			const stopDictationBtn = this.statusFloat.querySelector('.stop-dictation-btn');
 			if (stopDictationBtn) {
 				stopDictationBtn.addClass('is-hidden');
 			}
 			
 			// 恢复状态浮窗标题
-			const title = this.statusFloat.querySelector('.voice-assistant-status-title') as HTMLElement;
+			const title = this.statusFloat.querySelector('.voice-assistant-status-title');
 			if (title) {
 				title.textContent = '语音助手';
 				title.removeClass('is-active');
@@ -3300,7 +3385,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			});
 			
 			// 创建音频分析器检测音量
-			const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+			const audioContext = createAudioContext();
 			const analyser = audioContext.createAnalyser();
 			const source = audioContext.createMediaStreamSource(this.backgroundStream);
 			source.connect(analyser);
@@ -3337,7 +3422,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 				}
 				
 				// 继续检测
-				this.voiceDetectionTimer = setTimeout(checkVolume, this.settings.voiceDetectionSensitivity);
+				this.voiceDetectionTimer = window.setTimeout(checkVolume, this.settings.voiceDetectionSensitivity);
 			};
 			
 			checkVolume();
@@ -3359,7 +3444,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		
 		// 清除定时器
 		if (this.voiceDetectionTimer) {
-			clearTimeout(this.voiceDetectionTimer);
+			window.clearTimeout(this.voiceDetectionTimer);
 			this.voiceDetectionTimer = null;
 		}
 		
@@ -3425,16 +3510,16 @@ export default class VoiceAssistantPlugin extends Plugin {
 					this.preRecordingRecorder.stop();
 				}
 				
-				setTimeout(() => {
+				window.setTimeout(() => {
 					if (this.isPreRecording && this.preRecordingRecorder) {
 						this.preRecordingRecorder.start();
-						setTimeout(recordSegment, 200);
+						window.setTimeout(recordSegment, 200);
 					}
 				}, 10);
 			};
 			
 			this.preRecordingRecorder.start();
-			setTimeout(recordSegment, 200);
+			window.setTimeout(recordSegment, 200);
 			
 		} catch (error) {
 			this.debugLog('启动预录音缓冲失败:', error);
@@ -3521,7 +3606,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 		
 		// 立即开始新的对话，使用预录音缓冲
 		if (this.isInContinuousDialog) {
-			this.processSingleConversationWithBuffer();
+			void this.processSingleConversationWithBuffer();
 		}
 	}
 
@@ -3584,8 +3669,8 @@ export default class VoiceAssistantPlugin extends Plugin {
 				
 				// TTS播放完成后，重新启动预录音缓冲和背景语音检测
 				if (this.isInContinuousDialog) {
-					this.startPreRecordingBuffer();
-					this.startBackgroundVoiceDetection();
+					void this.startPreRecordingBuffer();
+					void this.startBackgroundVoiceDetection();
 				}
 			} else {
 				this.updateStatusFloat('回复已生成', 'success');
@@ -3788,7 +3873,7 @@ export default class VoiceAssistantPlugin extends Plugin {
 			
 		} catch (error) {
 			this.debugLog('保存对话文件失败:', error);
-			throw error;
+			throw normalizeError(error, '保存对话文件失败');
 		}
 	}
 }
@@ -4088,18 +4173,20 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 					cls: 'voice-assistant-delete-button'
 				});
 				
-				deleteButton.addEventListener('click', async () => {
-					this.plugin.settings.customModels.splice(index, 1);
+				deleteButton.addEventListener('click', () => {
+					void (async () => {
+						this.plugin.settings.customModels.splice(index, 1);
 					
-					// 如果删除的是当前选中的模型，清空选择
-					if (this.plugin.settings.selectedCustomModel === model.name) {
-						this.plugin.settings.selectedCustomModel = '';
-					}
+						// 如果删除的是当前选中的模型，清空选择
+						if (this.plugin.settings.selectedCustomModel === model.name) {
+							this.plugin.settings.selectedCustomModel = '';
+						}
 					
-					await this.plugin.saveSettings();
-					updateCustomModelDropdown();
-					updateExistingModelsList();
-					new Notice('自定义模型删除成功');
+						await this.plugin.saveSettings();
+						updateCustomModelDropdown();
+						updateExistingModelsList();
+						new Notice('自定义模型删除成功');
+					})();
 				});
 			});
 		};
@@ -4150,7 +4237,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		wakeIntervalSetting.addSlider(slider => slider
 			.setLimits(500, 5000, 100)
 			.setValue(this.plugin.settings.wakeDetectionInterval)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.wakeDetectionInterval = value;
 				wakeIntervalValueEl.textContent = `${value / 1000}秒`;
@@ -4190,7 +4276,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		dictationTimeoutSetting.addSlider(slider => slider
 			.setLimits(5, 30, 1)
 			.setValue(this.plugin.settings.dictationSilenceTimeout)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.dictationSilenceTimeout = value;
 				dictationTimeoutValueEl.textContent = `${value}秒`;
@@ -4209,7 +4294,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		dictationIntervalSetting.addSlider(slider => slider
 			.setLimits(1, 5, 0.5)
 			.setValue(this.plugin.settings.dictationSilenceInterval)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.dictationSilenceInterval = value;
 				dictationIntervalValueEl.textContent = `${value}秒`;
@@ -4287,7 +4371,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 				} else {
 					dropdown.setValue(options[0] || '');
 					this.plugin.settings.ttsVoice = options[0] || '';
-					this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				}
 				
 				dropdown.onChange(async (value) => {
@@ -4314,7 +4398,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		ttsSpeedSetting.addSlider(slider => slider
 			.setLimits(0, 100, 5)
 			.setValue(this.plugin.settings.ttsSpeed)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.ttsSpeed = value;
 				ttsSpeedValueEl.textContent = `${value}`;
@@ -4333,7 +4416,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		ttsVolumeSetting.addSlider(slider => slider
 			.setLimits(0, 100, 5)
 			.setValue(this.plugin.settings.ttsVolume)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.ttsVolume = value;
 				ttsVolumeValueEl.textContent = `${value}`;
@@ -4352,7 +4434,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		ttsPitchSetting.addSlider(slider => slider
 			.setLimits(0, 100, 5)
 			.setValue(this.plugin.settings.ttsPitch)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.ttsPitch = value;
 				ttsPitchValueEl.textContent = `${value}`;
@@ -4420,7 +4501,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 					try {
 						new Notice('开始录音测试，请说话...');
 						const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-						setTimeout(() => {
+						window.setTimeout(() => {
 							stream.getTracks().forEach(track => track.stop());
 							new Notice('录音测试完成');
 						}, 3000);
@@ -4445,7 +4526,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		dialogDurationSetting.addSlider(slider => slider
 			.setLimits(30, 300, 30)
 			.setValue(this.plugin.settings.continuousDialogDuration)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.continuousDialogDuration = value;
 				dialogDurationValueEl.textContent = `${value}秒`;
@@ -4495,7 +4575,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		voiceThresholdSetting.addSlider(slider => slider
 			.setLimits(10, 80, 5)
 			.setValue(this.plugin.settings.voiceDetectionThreshold)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.voiceDetectionThreshold = value;
 				voiceThresholdValueEl.textContent = `${value}`;
@@ -4514,7 +4593,6 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		voiceSensitivitySetting.addSlider(slider => slider
 			.setLimits(50, 500, 25)
 			.setValue(this.plugin.settings.voiceDetectionSensitivity)
-			.setDynamicTooltip()
 			.onChange(async (value) => {
 				this.plugin.settings.voiceDetectionSensitivity = value;
 				voiceSensitivityValueEl.textContent = `${value}ms`;
@@ -4555,7 +4633,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('测试 ASR')
 				.onClick(() => {
-					this.plugin.testOnlineASR();
+					void this.plugin.testOnlineASR();
 				}));
 
 		new Setting(containerEl)
@@ -4564,7 +4642,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('测试 TTS')
 				.onClick(() => {
-					this.plugin.testOnlineTTS();
+					void this.plugin.testOnlineTTS();
 				}));
 
 		new Setting(containerEl)
@@ -4573,7 +4651,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('测试基础TTS')
 				.onClick(() => {
-					this.plugin.testTTS();
+					void this.plugin.testTTS();
 				}));
 
 		new Setting(containerEl)
@@ -4582,7 +4660,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('测试朗读人')
 				.onClick(() => {
-					this.plugin.testAllVoiceSpeakers();
+					void this.plugin.testAllVoiceSpeakers();
 				}));
 
 		new Setting(containerEl)
@@ -4591,7 +4669,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('调试TTS')
 				.onClick(() => {
-					this.plugin.debugTTSConnection();
+					void this.plugin.debugTTSConnection();
 				}));
 
 		new Setting(containerEl)
@@ -4600,7 +4678,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			.addButton(button => button
 				.setButtonText('调试文本')
 				.onClick(() => {
-					this.plugin.debugTextContent();
+					void this.plugin.debugTextContent();
 				}));
 
 		// 帮助信息
@@ -4683,7 +4761,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			// 提示词标题和启用状态
 			const headerDiv = promptDiv.createDiv('voice-assistant-prompt-header');
 			
-			headerDiv.createEl('span', { text: prompt.name, cls: 'voice-assistant-prompt-title' });
+			headerDiv.createSpan({ text: prompt.name, cls: 'voice-assistant-prompt-title' });
 
 			const enableToggle = headerDiv.createEl('input', { type: 'checkbox' });
 			enableToggle.checked = prompt.enabled;
@@ -4700,7 +4778,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 			// 提示词内容
 			const promptContentDiv = promptDiv.createDiv('voice-assistant-prompt-content');
 			promptContentDiv.createEl('strong', { text: '提示词：' });
-			promptContentDiv.createEl('div', {
+			promptContentDiv.createDiv({
 				text: prompt.prompt,
 				cls: 'voice-assistant-prompt-text'
 			});
@@ -4738,7 +4816,7 @@ class VoiceAssistantSettingTab extends PluginSettingTab {
 		};
 
 		this.plugin.settings.customPrompts.push(newPrompt);
-		this.plugin.saveSettings().then(() => {
+		void this.plugin.saveSettings().then(() => {
 			this.displayCustomPrompts(containerEl);
 			// 自动编辑新添加的提示词
 			this.editCustomPrompt(containerEl, this.plugin.settings.customPrompts.length - 1);
