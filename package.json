@@ -5,7 +5,10 @@
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"test": "npm run build && node scripts/runtime-smoke.mjs",
 		"version": "node scripts/prepare-release.mjs --from-package && git add manifest.json versions.json package-lock.json"
 	},
 	"keywords": [
@@ -18,17 +21,16 @@
 	"author": "Yuhanbo Yu",
 	"license": "Apache-2.0",
 	"devDependencies": {
-		"@types/crypto-js": "^4.2.2",
-		"@types/node": "^16.11.6",
-		"@typescript-eslint/eslint-plugin": "5.29.0",
-		"@typescript-eslint/parser": "5.29.0",
-		"builtin-modules": "3.3.0",
-		"esbuild": "0.17.3",
+		"@eslint/js": "^9.30.1",
+		"@eslint/json": "0.14.0",
+		"@types/node": "^20.12.12",
+		"esbuild": "^0.28.1",
+		"eslint": "^9.30.1",
+		"eslint-plugin-obsidianmd": "^0.4.1",
 		"obsidian": "latest",
 		"tslib": "2.4.0",
-		"typescript": "4.7.4"
+		"typescript": "^5.4.5",
+		"typescript-eslint": "^8.35.1"
 	},
-	"dependencies": {
-		"crypto-js": "^4.2.0"
-	}
+	"dependencies": {}
 }
