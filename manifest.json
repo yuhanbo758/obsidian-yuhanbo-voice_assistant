@@ -1,7 +1,7 @@
 {
 	"id": "yuhanbo-voice-assistant",
 	"name": "Yuhanbo Voice Assistant",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"minAppVersion": "1.7.2",
 	"description": "Use voice recognition, speech synthesis, wake words, and optional AI providers from your notes.",
 	"author": "Yuhanbo Yu",
